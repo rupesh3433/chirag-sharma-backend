@@ -1,0 +1,2 @@
+Users can book makeup services through the website booking form or via the chatbot.
+Login is required only to confirm bookings.
