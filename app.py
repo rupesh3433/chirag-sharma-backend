@@ -4,16 +4,23 @@ from pydantic import BaseModel
 from typing import List
 import os
 import requests
+import logging
 from dotenv import load_dotenv
 
 # ----------------------
-# Load Environment
+# Basic Logging
+# ----------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ----------------------
+# Load Environment (local only; Render uses dashboard vars)
 # ----------------------
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
-    print("❌ ERROR: GROQ_API_KEY not found in .env file")
+    logger.error("GROQ_API_KEY not found. AI will not work.")
 
 # ----------------------
 # App Setup
@@ -22,7 +29,10 @@ app = FastAPI(title="JinniChirag Website Chatbot")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # React dev
+    allow_origins=[
+        "https://sharmachirag.vercel.app",  # production frontend
+        "http://localhost:5173",            # local dev
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,17 +49,22 @@ class ChatRequest(BaseModel):
     messages: List[Message]
 
 # ----------------------
-# Load Website Content (TXT files)
+# Load Website Content
 # ----------------------
-def load_website_content(folder="content"):
+def load_website_content(folder="content") -> str:
     blocks = []
     if not os.path.exists(folder):
-        print("⚠️ content/ folder not found")
+        logger.warning("content/ folder not found")
         return ""
+
     for file in os.listdir(folder):
         if file.endswith(".txt"):
-            with open(os.path.join(folder, file), "r", encoding="utf-8") as f:
-                blocks.append(f.read())
+            try:
+                with open(os.path.join(folder, file), "r", encoding="utf-8") as f:
+                    blocks.append(f.read())
+            except Exception as e:
+                logger.warning(f"Failed to read {file}: {e}")
+
     return "\n\n".join(blocks)
 
 WEBSITE_CONTENT = load_website_content()
@@ -61,10 +76,10 @@ SYSTEM_PROMPT = f"""
 You are the official AI assistant for the website "JinniChirag Makeup Artist".
 
 Rules:
-- Answer ONLY from the website content and conversation.
+- Answer ONLY using the website content and conversation context.
 - Allowed topics: services, makeup, booking, Chirag Sharma.
 - Be professional, polite, and concise.
-- If information is missing, clearly say you don't have it.
+- If information is missing, clearly say you do not have that information.
 - NEVER invent prices, experience, or contact details.
 
 Website Content:
@@ -77,15 +92,10 @@ Website Content:
 @app.post("/chat")
 async def chat(req: ChatRequest):
     if not GROQ_API_KEY:
-        return {
-            "reply": "⚠️ AI service is not configured properly."
-        }
+        return {"reply": "⚠️ AI service is not configured."}
 
-    messages_for_ai = [
-        {"role": "system", "content": SYSTEM_PROMPT}
-    ]
+    messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Add previous conversation (session memory)
     for msg in req.messages:
         messages_for_ai.append({
             "role": msg.role,
@@ -100,51 +110,51 @@ async def chat(req: ChatRequest):
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama-3.1-8b-instant",  # ✅ supported
+                "model": "llama-3.1-8b-instant",
                 "messages": messages_for_ai,
                 "temperature": 0.4,
             },
             timeout=20,
         )
 
-        # ❌ HTTP-level error (401, 429, 500, etc.)
         if response.status_code != 200:
+            logger.error(f"Groq HTTP error: {response.status_code}")
             return {
-                "reply": f"⚠️ AI service error (HTTP {response.status_code}). Please try again later."
+                "reply": "⚠️ AI service is temporarily unavailable. Please try again."
             }
 
-        # ❌ Invalid JSON
         try:
             data = response.json()
         except Exception:
+            logger.error("Invalid JSON from Groq API")
             return {
-                "reply": "⚠️ AI service returned invalid response."
+                "reply": "⚠️ AI service returned an invalid response."
             }
 
-        # ❌ Groq API error object
         if "error" in data:
+            logger.error(f"Groq API error: {data['error']}")
             return {
-                "reply": f"⚠️ AI service error: {data['error'].get('message', 'Unknown error')}"
+                "reply": "⚠️ AI service encountered an error."
             }
 
-        # ✅ Success
-        if "choices" in data and len(data["choices"]) > 0:
+        if data.get("choices"):
             return {
                 "reply": data["choices"][0]["message"]["content"]
             }
 
-        # ❌ Unexpected response format
+        logger.error("Unexpected Groq response format")
         return {
             "reply": "⚠️ AI service returned an unexpected response."
         }
 
     except requests.exceptions.Timeout:
+        logger.error("Groq API timeout")
         return {
             "reply": "⚠️ AI service timed out. Please try again."
         }
 
     except Exception as e:
-        print("❌ Internal Error:", e)
+        logger.exception("Internal chatbot error")
         return {
             "reply": "⚠️ Chatbot is temporarily unavailable."
         }
