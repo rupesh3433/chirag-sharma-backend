@@ -1,11 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List
+from pydantic import BaseModel, EmailStr
+from typing import List, Optional
 import os
 import requests
 import logging
 from dotenv import load_dotenv
+from datetime import datetime
+
+# MongoDB
+from pymongo import MongoClient
 
 # ----------------------
 # Basic Logging
@@ -14,18 +18,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ----------------------
-# Load Environment (local only; Render uses dashboard vars)
+# Load Environment
 # ----------------------
 load_dotenv()
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MONGO_URI = os.getenv("MONGO_URI")
 
 if not GROQ_API_KEY:
     logger.error("GROQ_API_KEY not found. AI will not work.")
 
+if not MONGO_URI:
+    logger.error("MONGO_URI not found. Booking system will not work.")
+
 # ----------------------
 # App Setup
 # ----------------------
-app = FastAPI(title="JinniChirag Website Chatbot")
+app = FastAPI(title="JinniChirag Website Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +48,19 @@ app.add_middleware(
 )
 
 # ----------------------
-# Models
+# MongoDB Setup (NEW)
+# ----------------------
+mongo_client = None
+booking_collection = None
+
+if MONGO_URI:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client["jinnichirag_db"]
+    booking_collection = db["bookings"]
+    logger.info("MongoDB connected successfully")
+
+# ----------------------
+# Chatbot Models (EXISTING)
 # ----------------------
 class Message(BaseModel):
     role: str   # "user" | "assistant"
@@ -47,6 +68,18 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[Message]
+
+# ----------------------
+# Booking Models (NEW)
+# ----------------------
+class BookingRequest(BaseModel):
+    service: str
+    package: str
+    name: str
+    email: EmailStr
+    phone: str
+    date: str
+    message: Optional[str] = None
 
 # ----------------------
 # Load Website Content
@@ -87,7 +120,7 @@ Website Content:
 """
 
 # ----------------------
-# Chat Endpoint
+# Chat Endpoint (EXISTING)
 # ----------------------
 @app.post("/chat")
 async def chat(req: ChatRequest):
@@ -119,45 +152,39 @@ async def chat(req: ChatRequest):
 
         if response.status_code != 200:
             logger.error(f"Groq HTTP error: {response.status_code}")
-            return {
-                "reply": "⚠️ AI service is temporarily unavailable. Please try again."
-            }
+            return {"reply": "⚠️ AI service is temporarily unavailable."}
 
-        try:
-            data = response.json()
-        except Exception:
-            logger.error("Invalid JSON from Groq API")
-            return {
-                "reply": "⚠️ AI service returned an invalid response."
-            }
+        data = response.json()
 
-        if "error" in data:
-            logger.error(f"Groq API error: {data['error']}")
-            return {
-                "reply": "⚠️ AI service encountered an error."
-            }
-
-        if data.get("choices"):
-            return {
-                "reply": data["choices"][0]["message"]["content"]
-            }
+        if "choices" in data and data["choices"]:
+            return {"reply": data["choices"][0]["message"]["content"]}
 
         logger.error("Unexpected Groq response format")
-        return {
-            "reply": "⚠️ AI service returned an unexpected response."
-        }
+        return {"reply": "⚠️ AI service returned an unexpected response."}
 
     except requests.exceptions.Timeout:
         logger.error("Groq API timeout")
-        return {
-            "reply": "⚠️ AI service timed out. Please try again."
-        }
+        return {"reply": "⚠️ AI service timed out."}
 
-    except Exception as e:
+    except Exception:
         logger.exception("Internal chatbot error")
-        return {
-            "reply": "⚠️ Chatbot is temporarily unavailable."
-        }
+        return {"reply": "⚠️ Chatbot is temporarily unavailable."}
+
+# ----------------------
+# Booking Endpoint (NEW)
+# ----------------------
+@app.post("/bookings")
+async def create_booking(booking: BookingRequest):
+    if booking_collection is None:
+        return {"error": "Booking service is not configured."}
+
+    booking_data = booking.dict()
+    booking_data["created_at"] = datetime.utcnow()
+    booking_data["status"] = "pending"
+
+    booking_collection.insert_one(booking_data)
+
+    return {"message": "Booking submitted successfully"}
 
 # ----------------------
 # Health Check
