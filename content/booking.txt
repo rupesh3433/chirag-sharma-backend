@@ -1,2 +1,16 @@
-Users can book makeup services through the website booking form or via the chatbot.
-Login is required only to confirm bookings.
+Booking Information – JinniChirag Makeup Artist
+
+Users can book makeup services directly through the website using the booking form.
+
+No login or account creation is required to submit a booking request.
+
+Booking process:
+- Users select a service and package (if applicable).
+- Users provide their contact details and preferred date.
+- The booking request is submitted and stored securely.
+
+After booking:
+- Booking requests are reviewed manually.
+- Users are contacted to confirm availability, pricing, and final details.
+
+Users may also ask about services and booking guidance through the chatbot, which helps direct them to the booking form.

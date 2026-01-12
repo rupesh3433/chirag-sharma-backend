@@ -1,6 +1,22 @@
-Frequently Asked Questions:
+Frequently Asked Questions – JinniChirag Makeup Artist
+
 Q: Do you provide bridal makeup?
-A: Yes, bridal makeup is one of our main services.
+A: Yes, bridal makeup is one of the primary services offered. Bridal makeup services are customized based on the client’s requirements, outfit, and occasion.
+
+Q: What types of makeup services do you offer?
+A: Services include bridal makeup, party makeup, engagement and pre-wedding makeup, fashion and photoshoot makeup, and professional hair styling.
+
+Q: How can I book a makeup service?
+A: Makeup services can be booked through the website booking form. Users can select a service, provide their details, and submit a booking request without creating an account.
+
+Q: Is login required to book a service?
+A: No, login or account creation is not required to submit a booking request.
 
 Q: Do you travel for events?
-A: Please contact us through the booking form for location-specific details.
+A: Travel availability depends on the event location and schedule. Users are advised to submit a booking request or use the booking form for location-specific details.
+
+Q: How is booking confirmation done?
+A: After a booking request is submitted, it is reviewed manually. Clients are contacted to confirm availability, pricing, and final details.
+
+Q: Can I request a custom makeup service?
+A: Yes, custom makeup services can be requested by mentioning specific requirements in the booking form.
