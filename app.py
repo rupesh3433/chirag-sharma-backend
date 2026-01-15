@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
@@ -7,9 +7,14 @@ import requests
 import logging
 from dotenv import load_dotenv
 from datetime import datetime
+from random import randint
 
 # MongoDB
 from pymongo import MongoClient
+from bson import ObjectId
+
+# Twilio
+from twilio.rest import Client
 
 # ----------------------
 # Basic Logging
@@ -25,11 +30,20 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 
-if not GROQ_API_KEY:
-    logger.error("GROQ_API_KEY not found. AI will not work.")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
 
-if not MONGO_URI:
-    logger.error("MONGO_URI not found. Booking system will not work.")
+# ----------------------
+# Country → Country Code (PHONE ONLY)
+# ----------------------
+COUNTRY_CODES = {
+    "Nepal": "+977",
+    "India": "+91",
+    "Pakistan": "+92",
+    "Bangladesh": "+880",
+    "Dubai": "+971",
+}
 
 # ----------------------
 # App Setup
@@ -39,8 +53,8 @@ app = FastAPI(title="JinniChirag Website Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://sharmachirag.vercel.app",  # production frontend
-        "http://localhost:5173",            # local dev
+        "https://sharmachirag.vercel.app",
+        "http://localhost:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -48,38 +62,49 @@ app.add_middleware(
 )
 
 # ----------------------
-# MongoDB Setup (NEW)
+# MongoDB Setup
 # ----------------------
-mongo_client = None
-booking_collection = None
-
-if MONGO_URI:
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client["jinnichirag_db"]
-    booking_collection = db["bookings"]
-    logger.info("MongoDB connected successfully")
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["jinnichirag_db"]
+booking_collection = db["bookings"]
 
 # ----------------------
-# Chatbot Models (EXISTING)
+# Twilio Client
+# ----------------------
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# ----------------------
+# Chatbot Models
 # ----------------------
 class Message(BaseModel):
-    role: str   # "user" | "assistant"
+    role: str
     content: str
 
 class ChatRequest(BaseModel):
     messages: List[Message]
 
 # ----------------------
-# Booking Models (NEW)
+# Booking Models (FIXED)
 # ----------------------
 class BookingRequest(BaseModel):
     service: str
     package: str
     name: str
     email: EmailStr
+
     phone: str
+    phone_country: str          # ✅ NEW (OTP destination)
+
+    service_country: str        # ✅ NEW (booking location)
+    address: str
+    pincode: str
     date: str
+
     message: Optional[str] = None
+
+class OtpVerifyRequest(BaseModel):
+    booking_id: str
+    otp: str
 
 # ----------------------
 # Load Website Content
@@ -87,7 +112,6 @@ class BookingRequest(BaseModel):
 def load_website_content(folder="content") -> str:
     blocks = []
     if not os.path.exists(folder):
-        logger.warning("content/ folder not found")
         return ""
 
     for file in os.listdir(folder):
@@ -103,7 +127,7 @@ def load_website_content(folder="content") -> str:
 WEBSITE_CONTENT = load_website_content()
 
 # ----------------------
-# System Prompt
+# SYSTEM PROMPT (UNCHANGED)
 # ----------------------
 SYSTEM_PROMPT = f"""
 You are the official AI assistant for the website "JinniChirag Makeup Artist".
@@ -120,71 +144,99 @@ Website Content:
 """
 
 # ----------------------
-# Chat Endpoint (EXISTING)
+# Chat Endpoint
 # ----------------------
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    if not GROQ_API_KEY:
-        return {"reply": "⚠️ AI service is not configured."}
-
     messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
-
     for msg in req.messages:
-        messages_for_ai.append({
-            "role": msg.role,
-            "content": msg.content
-        })
+        messages_for_ai.append(msg.dict())
 
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": messages_for_ai,
-                "temperature": 0.4,
-            },
-            timeout=20,
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "llama-3.1-8b-instant",
+            "messages": messages_for_ai,
+            "temperature": 0.4,
+        },
+        timeout=20,
+    )
+
+    data = response.json()
+    return {"reply": data["choices"][0]["message"]["content"]}
+
+# ==========================================================
+# 🔐 BOOKING WITH WHATSAPP OTP (FIXED LOGIC)
+# ==========================================================
+
+@app.post("/bookings/request")
+async def request_booking(booking: BookingRequest):
+
+    # ✅ Validate PHONE country (not service country)
+    phone_code = COUNTRY_CODES.get(booking.phone_country)
+    if not phone_code:
+        raise HTTPException(status_code=400, detail="Unsupported phone country")
+
+    if not booking.phone.startswith(phone_code):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Phone number must start with {phone_code}"
         )
 
-        if response.status_code != 200:
-            logger.error(f"Groq HTTP error: {response.status_code}")
-            return {"reply": "⚠️ AI service is temporarily unavailable."}
-
-        data = response.json()
-
-        if "choices" in data and data["choices"]:
-            return {"reply": data["choices"][0]["message"]["content"]}
-
-        logger.error("Unexpected Groq response format")
-        return {"reply": "⚠️ AI service returned an unexpected response."}
-
-    except requests.exceptions.Timeout:
-        logger.error("Groq API timeout")
-        return {"reply": "⚠️ AI service timed out."}
-
-    except Exception:
-        logger.exception("Internal chatbot error")
-        return {"reply": "⚠️ Chatbot is temporarily unavailable."}
-
-# ----------------------
-# Booking Endpoint (NEW)
-# ----------------------
-@app.post("/bookings")
-async def create_booking(booking: BookingRequest):
-    if booking_collection is None:
-        return {"error": "Booking service is not configured."}
+    otp = randint(100000, 999999)
 
     booking_data = booking.dict()
-    booking_data["created_at"] = datetime.utcnow()
-    booking_data["status"] = "pending"
+    booking_data.update({
+        "otp": otp,
+        "otp_verified": False,
+        "status": "otp_pending",
+        "created_at": datetime.utcnow()
+    })
 
-    booking_collection.insert_one(booking_data)
+    result = booking_collection.insert_one(booking_data)
 
-    return {"message": "Booking submitted successfully"}
+    # ✅ Send OTP to WhatsApp number (independent of service country)
+    try:
+        twilio_client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=f"whatsapp:{booking.phone}",
+            body=f"Your JinniChirag booking OTP is {otp}"
+        )
+    except Exception as e:
+        logger.error(f"WhatsApp OTP failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send WhatsApp OTP")
+
+    return {
+        "booking_id": str(result.inserted_id),
+        "message": "OTP sent via WhatsApp"
+    }
+
+@app.post("/bookings/verify-otp")
+async def verify_otp(data: OtpVerifyRequest):
+    booking = booking_collection.find_one({
+        "_id": ObjectId(data.booking_id),
+        "otp": int(data.otp)
+    })
+
+    if not booking:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    booking_collection.update_one(
+        {"_id": booking["_id"]},
+        {
+            "$set": {
+                "otp_verified": True,
+                "status": "pending"
+            },
+            "$unset": {"otp": ""}
+        }
+    )
+
+    return {"message": "Booking request confirmed"}
 
 # ----------------------
 # Health Check
