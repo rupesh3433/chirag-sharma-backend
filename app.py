@@ -256,7 +256,7 @@ def send_password_reset_email(email: str, token: str):
                     "content-type": "application/json"
                 },
                 json={
-                    "sender": {"name": "JinniChirag Admin", "email": "noreply@jinnichirag.com"},
+                    "sender": {"name": "JinniChirag Admin", "email": "poudelrupace@gmail.com"},
                     "to": [{"email": email}],
                     "subject": "JinniChirag Admin - Password Reset",
                     "htmlContent": f"""
