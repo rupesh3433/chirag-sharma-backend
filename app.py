@@ -12,6 +12,8 @@ from random import randint
 import secrets
 import jwt
 import bcrypt
+import re
+
 
 from pymongo import MongoClient
 from bson import ObjectId
@@ -464,19 +466,15 @@ STRICTLY FORBIDDEN:
     return {
         "reply": data["choices"][0]["message"]["content"]
     }
-
 @app.post("/bookings/request")
 async def request_booking(booking: BookingRequest):
     """Public booking request endpoint - sends OTP"""
-    
-    phone_code = COUNTRY_CODES.get(booking.phone_country)
-    if not phone_code:
-        raise HTTPException(status_code=400, detail="Unsupported phone country")
 
-    if not booking.phone.startswith(phone_code):
+    # ✅ E.164 validation (GLOBAL SAFE)
+    if not re.match(r"^\+\d{10,15}$", booking.phone):
         raise HTTPException(
             status_code=400,
-            detail=f"Phone number must start with {phone_code}"
+            detail="Invalid phone number format. Use country code, e.g. +919876543210"
         )
 
     otp = randint(100000, 999999)
@@ -492,7 +490,10 @@ async def request_booking(booking: BookingRequest):
     result = booking_collection.insert_one(booking_data)
 
     if not twilio_client:
-        raise HTTPException(status_code=500, detail="WhatsApp service unavailable")
+        raise HTTPException(
+            status_code=500,
+            detail="WhatsApp service unavailable"
+        )
 
     try:
         twilio_client.messages.create(
@@ -501,13 +502,17 @@ async def request_booking(booking: BookingRequest):
             body=f"Your JinniChirag booking OTP is {otp}"
         )
     except Exception as e:
-        logger.error(f"WhatsApp OTP failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to send WhatsApp OTP")
+        logger.error(f"WhatsApp OTP failed for {booking.phone}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send WhatsApp OTP. Please ensure WhatsApp is enabled for this number."
+        )
 
     return {
         "booking_id": str(result.inserted_id),
         "message": "OTP sent via WhatsApp"
     }
+
 
 @app.post("/bookings/verify-otp")
 async def verify_otp(data: OtpVerifyRequest):
