@@ -75,6 +75,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://sharmachirag.vercel.app",
+        "https://sharmachiragadmin.vercel.app",
         "http://localhost:5173",
         "http://localhost:5174",
     ],
@@ -82,6 +83,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ----------------------
 # MongoDB
@@ -208,22 +210,28 @@ def verify_jwt_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def get_current_admin(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """Dependency to get current authenticated admin"""
+def get_current_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> dict:
+
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
     token = credentials.credentials
     payload = verify_jwt_token(token)
-    
+
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-    
+
     admin = admin_collection.find_one({"email": payload["email"]})
     if not admin:
         raise HTTPException(status_code=403, detail="Admin not found")
-    
+
     return {
         "email": admin["email"],
         "role": admin["role"]
     }
+
 
 def send_password_reset_email(email: str, token: str):
     """Send password reset email"""
