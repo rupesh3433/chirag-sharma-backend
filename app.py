@@ -39,13 +39,13 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
 
 # Email configuration for password reset
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp-relay.brevo.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_EMAIL = os.getenv("SMTP_EMAIL")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 # Frontend URL for Admin-Panel
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.getenv("FRONTEND_URL")
 
 # ----------------------
 # Permanent Admins (Auto-create on first reset)
@@ -84,7 +84,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ----------------------
 # MongoDB
 # ----------------------
@@ -103,12 +102,16 @@ booking_collection.create_index("status")
 # ----------------------
 # Twilio
 # ----------------------
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+try:
+    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+except Exception as e:
+    logger.warning(f"Twilio client initialization failed: {e}")
+    twilio_client = None
 
 # ----------------------
-# Security
+# Security (FIXED: auto_error=False to allow unauthenticated routes)
 # ----------------------
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # ==========================================================
 # MODELS - PUBLIC
@@ -210,42 +213,39 @@ def verify_jwt_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def get_current_admin(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-) -> dict:
-
+def get_current_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
+    """Dependency to get current authenticated admin"""
     if credentials is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-
+    
     token = credentials.credentials
     payload = verify_jwt_token(token)
-
+    
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-
+    
     admin = admin_collection.find_one({"email": payload["email"]})
     if not admin:
         raise HTTPException(status_code=403, detail="Admin not found")
-
+    
     return {
         "email": admin["email"],
         "role": admin["role"]
     }
 
-
 def send_password_reset_email(email: str, token: str):
-    """Send password reset email"""
+    """Send password reset email via Brevo SMTP"""
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
 
-    # Validate SMTP configuration
     if not SMTP_EMAIL or not SMTP_PASSWORD:
-        logger.error("SMTP credentials not configured in .env")
-        raise HTTPException(
-            status_code=500, 
-            detail="Email service not configured. Please contact administrator."
-        )
+        logger.error("SMTP credentials not configured")
+        raise Exception("SMTP not configured")
+
+    if not FRONTEND_URL:
+        logger.error("FRONTEND_URL not configured")
+        raise Exception("FRONTEND_URL not configured")
 
     reset_link = f"{FRONTEND_URL}/admin/reset-password?token={token}"
     
@@ -272,31 +272,13 @@ def send_password_reset_email(email: str, token: str):
     part = MIMEText(html, "html")
     message.attach(part)
     
-    try:
-        # Try SSL first (port 465), fallback to TLS (port 587)
-        if SMTP_PORT == 465:
-            import smtplib
-            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                server.sendmail(SMTP_EMAIL, email, message.as_string())
-        else:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
-                server.starttls()
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                server.sendmail(SMTP_EMAIL, email, message.as_string())
-        logger.info(f"Password reset email sent to {email}")
-    except smtplib.SMTPAuthenticationError:
-        logger.error("SMTP authentication failed - check credentials")
-        raise HTTPException(
-            status_code=500, 
-            detail="Email service authentication failed. Please contact administrator."
-        )
-    except Exception as e:
-        logger.error(f"Failed to send reset email: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail="Failed to send reset email. Please try again later."
-        )
+    # FIXED: Brevo-specific SMTP (no starttls for Brevo)
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+        server.ehlo()
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, email, message.as_string())
+    
+    logger.info(f"Password reset email sent to {email}")
 
 def serialize_booking(booking: dict) -> dict:
     """Convert MongoDB document to JSON-safe format"""
@@ -448,6 +430,9 @@ async def request_booking(booking: BookingRequest):
 
     result = booking_collection.insert_one(booking_data)
 
+    if not twilio_client:
+        raise HTTPException(status_code=500, detail="WhatsApp service unavailable")
+
     try:
         twilio_client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
@@ -536,7 +521,12 @@ async def admin_forgot_password(request: AdminPasswordResetRequest):
         "used": False
     })
     
-    send_password_reset_email(email, reset_token)
+    # FIXED: Never expose SMTP errors (security best practice)
+    try:
+        send_password_reset_email(email, reset_token)
+    except Exception as e:
+        logger.error(f"Password reset email failed for {email}: {e}")
+        # Still return success to prevent email enumeration
     
     return {
         "message": "If your email is registered, you will receive a password reset link"
