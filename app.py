@@ -39,10 +39,13 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
 
 # Email configuration for password reset
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp-relay.brevo.com")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_EMAIL = os.getenv("SMTP_EMAIL")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+
+# Brevo API (for environments that block SMTP)
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
 # Frontend URL for Admin-Panel
 FRONTEND_URL = os.getenv("FRONTEND_URL")
@@ -234,20 +237,63 @@ def get_current_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depe
     }
 
 def send_password_reset_email(email: str, token: str):
-    """Send password reset email via Brevo SMTP"""
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
-        logger.error("SMTP credentials not configured")
-        raise Exception("SMTP not configured")
-
+    """Send password reset email via Brevo API or SMTP"""
+    
     if not FRONTEND_URL:
         logger.error("FRONTEND_URL not configured")
         raise Exception("FRONTEND_URL not configured")
 
     reset_link = f"{FRONTEND_URL}/admin/reset-password?token={token}"
+    
+    # Try Brevo API first (works on Render), fallback to SMTP (for local dev)
+    if BREVO_API_KEY:
+        try:
+            response = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "accept": "application/json",
+                    "api-key": BREVO_API_KEY,
+                    "content-type": "application/json"
+                },
+                json={
+                    "sender": {"name": "JinniChirag Admin", "email": "noreply@jinnichirag.com"},
+                    "to": [{"email": email}],
+                    "subject": "JinniChirag Admin - Password Reset",
+                    "htmlContent": f"""
+                        <html>
+                          <body>
+                            <h2>Password Reset Request</h2>
+                            <p>You requested to reset your password for JinniChirag Admin Panel.</p>
+                            <p>Click the link below to reset your password:</p>
+                            <p><a href="{reset_link}">Reset Password</a></p>
+                            <p>This link will expire in 1 hour.</p>
+                            <p>If you didn't request this, please ignore this email.</p>
+                            <br>
+                            <p>- JinniChirag Team</p>
+                          </body>
+                        </html>
+                    """
+                },
+                timeout=10
+            )
+            if response.status_code == 201:
+                logger.info(f"Password reset email sent to {email} via Brevo API")
+                return
+            else:
+                logger.error(f"Brevo API failed: {response.status_code} - {response.text}")
+                raise Exception("Brevo API failed")
+        except Exception as e:
+            logger.error(f"Brevo API error: {e}")
+            raise
+    
+    # Fallback to SMTP for local development
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        logger.error("Neither Brevo API nor SMTP credentials configured")
+        raise Exception("Email service not configured")
+    
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
     
     message = MIMEMultipart("alternative")
     message["Subject"] = "JinniChirag Admin - Password Reset"
@@ -272,13 +318,12 @@ def send_password_reset_email(email: str, token: str):
     part = MIMEText(html, "html")
     message.attach(part)
     
-    # FIXED: Brevo-specific SMTP (no starttls for Brevo)
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
         server.ehlo()
         server.login(SMTP_EMAIL, SMTP_PASSWORD)
         server.sendmail(SMTP_EMAIL, email, message.as_string())
     
-    logger.info(f"Password reset email sent to {email}")
+    logger.info(f"Password reset email sent to {email} via SMTP")
 
 def serialize_booking(booking: dict) -> dict:
     """Convert MongoDB document to JSON-safe format"""
