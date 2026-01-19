@@ -111,6 +111,22 @@ except Exception as e:
     logger.warning(f"Twilio client initialization failed: {e}")
     twilio_client = None
 
+def send_whatsapp_message(phone: str, message: str):
+    """Send WhatsApp message via Twilio"""
+    if not twilio_client:
+        logger.warning("Twilio not configured - cannot send WhatsApp message")
+        return
+    
+    try:
+        twilio_client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=f"whatsapp:{phone}",
+            body=message
+        )
+        logger.info(f"WhatsApp message sent to {phone}")
+    except Exception as e:
+        logger.error(f"WhatsApp message failed for {phone}: {e}")
+
 # ----------------------
 # Security (FIXED: auto_error=False to allow unauthenticated routes)
 # ----------------------
@@ -171,7 +187,7 @@ class BookingStatusUpdate(BaseModel):
     
     @validator('status')
     def valid_status(cls, v):
-        allowed = ['pending', 'completed', 'cancelled']
+        allowed = ['pending', 'approved', 'completed', 'cancelled']
         if v not in allowed:
             raise ValueError(f'Status must be one of {allowed}')
         return v
@@ -731,20 +747,68 @@ async def update_booking_status(
     status_update: BookingStatusUpdate,
     admin: dict = Depends(get_current_admin)
 ):
-    """Update booking status"""
+    """Update booking status and send WhatsApp notification"""
     
     try:
-        result = booking_collection.update_one(
-            {"_id": ObjectId(booking_id)},
-            {"$set": {"status": status_update.status, "updated_at": datetime.utcnow()}}
-        )
+        booking = booking_collection.find_one({"_id": ObjectId(booking_id)})
     except:
         raise HTTPException(status_code=400, detail="Invalid booking ID")
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    
+    new_status = status_update.status
+    
+    # Send WhatsApp messages based on status change
+    if new_status == "approved":
+        message = (
+            f"Hello {booking['name']} 👋\n\n"
+            f"✅ Your appointment with *JinniChirag Makeup Artist* is CONFIRMED!\n\n"
+            f"📅 Date: {booking['date']}\n"
+            f"📍 Location: {booking['address']}, {booking['pincode']}\n"
+            f"🎨 Service: {booking['service']} - {booking['package']}\n\n"
+            f"I'm looking forward to making you look stunning! 💄✨\n\n"
+            f"See you soon!\n"
+            f"- Chirag Sharma"
+        )
+        send_whatsapp_message(booking["phone"], message)
+        logger.info(f"Approved booking {booking_id} - WhatsApp sent to {booking['phone']}")
+    
+    elif new_status == "cancelled":
+        message = (
+            f"Hello {booking['name']} 🙏\n\n"
+            f"I'm sorry, but I'm not available on {booking['date']} 😔\n\n"
+            f"Please feel free to book another appointment that works for you.\n\n"
+            f"I apologize for the inconvenience and hope to serve you soon!\n\n"
+            f"Thank you for understanding.\n"
+            f"- Chirag Sharma"
+        )
+        send_whatsapp_message(booking["phone"], message)
+        logger.info(f"Cancelled booking {booking_id} - WhatsApp sent to {booking['phone']}")
+    
+    elif new_status == "completed":
+        message = (
+            f"Hello {booking['name']} 🌸\n\n"
+            f"Thank you for choosing *JinniChirag Makeup Artist*! 💖\n\n"
+            f"I hope you absolutely loved the service and are feeling confident and beautiful! ✨\n\n"
+            f"It was wonderful working with you. Please visit again!\n\n"
+            f"Share your feedback and tag me on social media 📸\n\n"
+            f"With love,\n"
+            f"Chirag Sharma 💄"
+        )
+        send_whatsapp_message(booking["phone"], message)
+        logger.info(f"Completed booking {booking_id} - WhatsApp sent to {booking['phone']}")
+    
+    # Update booking status in database
+    result = booking_collection.update_one(
+        {"_id": booking["_id"]},
+        {"$set": {"status": new_status, "updated_at": datetime.utcnow()}}
+    )
     
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Booking not found")
     
-    return {"message": "Status updated successfully"}
+    return {"message": f"Booking status updated to {new_status}"}
 
 @app.delete("/admin/bookings/{booking_id}")
 async def delete_booking(
@@ -773,6 +837,7 @@ async def get_analytics_overview(admin: dict = Depends(get_current_admin)):
     
     total_bookings = booking_collection.count_documents({})
     pending_bookings = booking_collection.count_documents({"status": "pending"})
+    approved_bookings = booking_collection.count_documents({"status": "approved"})
     completed_bookings = booking_collection.count_documents({"status": "completed"})
     cancelled_bookings = booking_collection.count_documents({"status": "cancelled"})
     otp_pending = booking_collection.count_documents({"status": "otp_pending"})
@@ -790,6 +855,7 @@ async def get_analytics_overview(admin: dict = Depends(get_current_admin)):
     return {
         "total_bookings": total_bookings,
         "pending_bookings": pending_bookings,
+        "approved_bookings": approved_bookings,
         "completed_bookings": completed_bookings,
         "cancelled_bookings": cancelled_bookings,
         "otp_pending": otp_pending,
