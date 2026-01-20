@@ -147,6 +147,7 @@ class ChatRequest(BaseModel):
     language: str  # en | ne | hi | mr
 
 class BookingRequest(BaseModel):
+    booking_id: Optional[str] = None
     service: str
     package: str
     name: str
@@ -466,78 +467,90 @@ STRICTLY FORBIDDEN:
     return {
         "reply": data["choices"][0]["message"]["content"]
     }
+
+
+
+#BOOKING APIs
+TEMP_BOOKING_OTPS = {}
+
 @app.post("/bookings/request")
 async def request_booking(booking: BookingRequest):
-    """Public booking request endpoint - sends OTP"""
+    """Send or resend OTP (single booking_id)"""
 
-    # ✅ E.164 validation (GLOBAL SAFE)
     if not re.match(r"^\+\d{10,15}$", booking.phone):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid phone number format. Use country code, e.g. +919876543210"
-        )
+        raise HTTPException(400, "Invalid phone number format")
 
-    otp = randint(100000, 999999)
+    otp = str(randint(100000, 999999))
+    expires_at = datetime.utcnow() + timedelta(minutes=5)
 
-    booking_data = booking.dict()
-    booking_data.update({
-        "otp": otp,
-        "otp_verified": False,
-        "status": "otp_pending",
-        "created_at": datetime.utcnow()
-    })
+    # 🔁 RESEND OTP (reuse SAME booking_id)
+    if booking.booking_id:
+        if booking.booking_id not in TEMP_BOOKING_OTPS:
+            raise HTTPException(400, "Invalid or expired booking request")
 
-    result = booking_collection.insert_one(booking_data)
+        TEMP_BOOKING_OTPS[booking.booking_id] = {
+            "otp": otp,
+            "expires_at": expires_at,
+            "booking_data": booking.dict(exclude={"booking_id"})
+        }
 
-    if not twilio_client:
-        raise HTTPException(
-            status_code=500,
-            detail="WhatsApp service unavailable"
-        )
+        booking_id = booking.booking_id
 
+    # 🆕 FIRST REQUEST
+    else:
+        booking_id = secrets.token_urlsafe(16)
+        TEMP_BOOKING_OTPS[booking_id] = {
+            "otp": otp,
+            "expires_at": expires_at,
+            "booking_data": booking.dict()
+        }
+
+    # 📲 Send OTP
     try:
         twilio_client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
             to=f"whatsapp:{booking.phone}",
             body=f"Your JinniChirag booking OTP is {otp}"
         )
-    except Exception as e:
-        logger.error(f"WhatsApp OTP failed for {booking.phone}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to send WhatsApp OTP. Please ensure WhatsApp is enabled for this number."
-        )
+    except Exception:
+        TEMP_BOOKING_OTPS.pop(booking_id, None)
+        raise HTTPException(500, "Failed to send WhatsApp OTP")
 
     return {
-        "booking_id": str(result.inserted_id),
+        "booking_id": booking_id,
         "message": "OTP sent via WhatsApp"
     }
 
-
 @app.post("/bookings/verify-otp")
 async def verify_otp(data: OtpVerifyRequest):
-    """Public OTP verification endpoint"""
-    
-    booking = booking_collection.find_one({
-        "_id": ObjectId(data.booking_id),
-        "otp": int(data.otp)
+    temp = TEMP_BOOKING_OTPS.get(data.booking_id)
+
+    if not temp:
+        raise HTTPException(400, "Invalid or expired booking request")
+
+    if datetime.utcnow() > temp["expires_at"]:
+        TEMP_BOOKING_OTPS.pop(data.booking_id, None)
+        raise HTTPException(400, "OTP expired")
+
+    if data.otp != temp["otp"]:
+        raise HTTPException(400, "Invalid OTP")
+
+    # ✅ OTP VERIFIED → SAVE TO DB
+    booking_data = temp["booking_data"]
+    booking_data.update({
+        "status": "pending",
+        "otp_verified": True,
+        "created_at": datetime.utcnow()
     })
 
-    if not booking:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+    result = booking_collection.insert_one(booking_data)
 
-    booking_collection.update_one(
-        {"_id": booking["_id"]},
-        {
-            "$set": {
-                "otp_verified": True,
-                "status": "pending"
-            },
-            "$unset": {"otp": ""}
-        }
-    )
+    TEMP_BOOKING_OTPS.pop(data.booking_id, None)
 
-    return {"message": "Booking request confirmed"}
+    return {
+        "message": "Booking confirmed",
+        "booking_id": str(result.inserted_id)
+    }
 
 # ############################################################
 # ADMIN ROUTES - AUTHENTICATION
