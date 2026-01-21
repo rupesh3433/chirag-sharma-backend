@@ -147,6 +147,9 @@ async def agent_chat(req: AgentChatRequest):
     # Build conversation context
     conv_context = get_conversation_context(memory)
     
+    # Store old intent to detect what was newly collected
+    old_summary = memory.intent.get_summary()
+    
     # Extract intent with context awareness
     memory.intent = extract_intent_from_message(
         req.message, 
@@ -155,6 +158,10 @@ async def agent_chat(req: AgentChatRequest):
         conv_context
     )
     
+    # Detect newly collected fields
+    new_summary = memory.intent.get_summary()
+    newly_collected = {k: v for k, v in new_summary.items() if k not in old_summary}
+    
     # Get missing fields
     missing = memory.intent.missing_fields()
     
@@ -162,12 +169,31 @@ async def agent_chat(req: AgentChatRequest):
     if not missing and memory.stage == "collecting_info":
         return await _send_otp_to_user(memory, req.language)
     
-    # Still collecting info - ask for next field
+    # Still collecting info - acknowledge and ask for next
     if missing and memory.stage == "collecting_info":
-        next_field = missing[0]
-        reply = _get_field_question(next_field, memory.intent, req.language)
+        # Build response
+        reply_parts = []
         
-        memory.last_asked_field = _get_field_key(next_field)
+        # Acknowledge newly collected fields (if any)
+        if newly_collected:
+            from agent_prompts import acknowledge_collected_fields
+            ack = acknowledge_collected_fields(newly_collected, req.language)
+            reply_parts.append(ack)
+        
+        # Ask for next field or suggest bulk input
+        if len(missing) > 3:
+            # Many fields remaining - suggest bulk
+            from agent_prompts import get_bulk_request_message
+            bulk_msg = get_bulk_request_message(missing[:5], req.language)
+            reply_parts.append(bulk_msg)
+        else:
+            # Few fields - ask one by one
+            next_field = missing[0]
+            question = _get_field_question(next_field, memory.intent, req.language)
+            reply_parts.append(question)
+            memory.last_asked_field = _get_field_key(next_field)
+        
+        reply = "\n\n".join(reply_parts)
         
         memory.add_message("user", req.message)
         memory.add_message("assistant", reply)
@@ -179,7 +205,7 @@ async def agent_chat(req: AgentChatRequest):
             stage=memory.stage,
             action="continue",
             missing_fields=missing,
-            collected_info=memory.intent.get_summary(),
+            collected_info=new_summary,
             chat_mode="agent",
             next_expected=memory.last_asked_field
         )

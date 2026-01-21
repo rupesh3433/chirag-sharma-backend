@@ -62,15 +62,35 @@ async def chat(req: ChatRequest):
             },
             timeout=20,
         )
-    except Exception as e:
-        logger.error(f"GROQ API failure: {e}")
+        
+        # Check response status
+        if response.status_code != 200:
+            logger.error(f"GROQ API error {response.status_code}: {response.text}")
+            raise HTTPException(status_code=500, detail="AI service temporarily unavailable")
+        
+        data = response.json()
+        
+        # Validate response structure
+        if "choices" not in data or not data["choices"]:
+            logger.error(f"GROQ API invalid response: {data}")
+            raise HTTPException(status_code=500, detail="AI service returned invalid response")
+        
+        return {
+            "reply": data["choices"][0]["message"]["content"]
+        }
+        
+    except requests.exceptions.Timeout:
+        logger.error("GROQ API timeout")
+        raise HTTPException(status_code=504, detail="AI service timeout")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"GROQ API request failed: {e}")
         raise HTTPException(status_code=500, detail="AI service unavailable")
-
-    data = response.json()
-
-    return {
-        "reply": data["choices"][0]["message"]["content"]
-    }
+    except KeyError as e:
+        logger.error(f"GROQ API response parsing error: {e}")
+        raise HTTPException(status_code=500, detail="AI service error")
+    except Exception as e:
+        logger.error(f"Unexpected error in chat: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/bookings/request")
 async def request_booking(booking: BookingRequest):

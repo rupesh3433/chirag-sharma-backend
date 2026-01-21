@@ -86,11 +86,12 @@ AVAILABLE SERVICES & PRICING:
 CONVERSATION RULES:
 1. Always respond in {lang_name}
 2. Be warm, professional, and helpful
-3. Ask for ONE missing field at a time
-4. Acknowledge information naturally
-5. For service questions, provide accurate pricing from above
-6. When all info collected, confirm before sending OTP
-7. Available countries: India, Nepal, Pakistan, Bangladesh, Dubai
+3. **SMART COLLECTION**: Accept multiple fields at once when user provides them
+4. When asking for info, suggest bulk input format
+5. Acknowledge all collected information naturally
+6. For service questions, provide accurate pricing from above
+7. When all info collected, confirm before sending OTP
+8. Available countries: India, Nepal, Pakistan, Bangladesh, Dubai
 
 RESPONSE STYLE:
 - Keep responses concise (2-3 sentences)
@@ -112,7 +113,11 @@ def get_welcome_message(language: str, is_booking: bool = False) -> str:
 • Engagement & Pre-Wedding (₹19,999 - ₹59,999)
 • Henna/Mehendi (₹19,999 - ₹49,999)
 
-Which service interests you?""",
+Which service interests you?
+
+💡 **Tip**: You can provide multiple details at once to save time!
+Example: "Party makeup, name is John, email john@email.com, phone +91-9876543210"
+""",
             "ne": """👋 स्वागत छ! म तपाईंलाई मेकअप सेवा बुक गर्न मद्दत गर्छु।
 
 **उपलब्ध सेवाहरू:**
@@ -121,7 +126,9 @@ Which service interests you?""",
 • इन्गेजमेन्ट र प्री-वेडिंग (₹१९,९९९ - ₹५९,९९९)
 • हेन्ना/मेहेन्दी (₹१९,९९९ - ₹४९,९९९)
 
-कुन सेवा चाहिन्छ?""",
+कुन सेवा चाहिन्छ?
+
+💡 **सुझाव**: समय बचाउन धेरै विवरणहरू एकैपटक दिन सक्नुहुन्छ!""",
             "hi": """👋 स्वागत है! मैं आपको मेकअप सेवा बुक करने में मदद करूंगा।
 
 **उपलब्ध सेवाएं:**
@@ -130,7 +137,9 @@ Which service interests you?""",
 • एंगेजमेंट और प्री-वेडिंग (₹१९,९९९ - ₹५९,९९९)
 • मेंहदी (₹१९,९९९ - ₹४९,९९९)
 
-कौन सी सेवा चाहिए?""",
+कौन सी सेवा चाहिए?
+
+💡 **सुझाव**: समय बचाने के लिए एक साथ कई विवरण दे सकते हैं!""",
             "mr": """👋 स्वागत आहे! मी तुम्हाला मेकअप सेवा बुक करण्यात मदत करेन।
 
 **उपलब्ध सेवा:**
@@ -139,7 +148,9 @@ Which service interests you?""",
 • इंगेजमेंट आणि प्री-वेडिंग (₹१९,९९९ - ₹५९,९९९)
 • मेंदी (₹१९,९९९ - ₹४९,९९९)
 
-कोणती सेवा हवी?"""
+कोणती सेवा हवी?
+
+💡 **सूचना**: वेळ वाचवण्यासाठी एकाच वेळी अनेक तपशील देऊ शकता!"""
         }
         return messages.get(language, messages["en"])
     
@@ -149,6 +160,37 @@ Which service interests you?""",
         "hi": "👋 नमस्ते! मैं JinniChirag AI हूँ। मैं बुकिंग और प्रश्नों में मदद कर सकता हूँ। कैसे मदद करूं?",
         "mr": "👋 नमस्कार! मी JinniChirag AI आहे. मी बुकिंग आणि प्रश्नांमध्ये मदत करू शकतो. कशी मदत करू?"
     }
+    return messages.get(language, messages["en"])
+
+def get_bulk_request_message(missing_fields: list, language: str) -> str:
+    """Ask for remaining fields in bulk"""
+    messages = {
+        "en": f"""📝 I still need the following information:
+
+{chr(10).join(f"• {field}" for field in missing_fields)}
+
+💡 **Quick Tip**: You can provide all at once to save time!
+Example: "Name: John Doe, Email: john@email.com, Phone: +91-9876543210, Country: India"
+
+Or provide them one by one. What would you like to share?""",
+        
+        "ne": f"""📝 मलाई अझै यी जानकारी चाहिन्छ:
+
+{chr(10).join(f"• {field}" for field in missing_fields)}
+
+💡 **छिटो तरिका**: समय बचाउन सबै एकैपटक दिन सक्नुहुन्छ!
+
+के तपाईं सबै एकैपटक दिन चाहनुहुन्छ वा एक-एक गरेर?""",
+        
+        "hi": f"""📝 मुझे अभी भी यह जानकारी चाहिए:
+
+{chr(10).join(f"• {field}" for field in missing_fields)}
+
+💡 **तेज़ तरीका**: समय बचाने के लिए सब एक साथ दे सकते हैं!
+
+आप क्या देना चाहेंगे?"""
+    }
+    
     return messages.get(language, messages["en"])
 
 def get_otp_sent_message(language: str, phone: str) -> str:
@@ -243,3 +285,20 @@ def get_package_options(service: str, language: str) -> str:
         result += f"{idx}. {pkg} - {price}\n"
     
     return result.strip()
+
+def acknowledge_collected_fields(collected_summary: dict, language: str) -> str:
+    """Acknowledge what was just collected"""
+    if not collected_summary:
+        return ""
+    
+    templates = {
+        "en": "✅ Got it! I've recorded:\n{items}",
+        "ne": "✅ बुझें! मैले रेकर्ड गरें:\n{items}",
+        "hi": "✅ समझ गया! मैंने रिकॉर्ड किया:\n{items}",
+        "mr": "✅ समजले! मी रेकॉर्ड केले:\n{items}"
+    }
+    
+    items = "\n".join(f"• {k}: {v}" for k, v in collected_summary.items())
+    template = templates.get(language, templates["en"])
+    
+    return template.format(items=items)
