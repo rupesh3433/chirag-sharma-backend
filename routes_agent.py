@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 import logging
 import re
+import requests
 from datetime import datetime, timedelta
 from random import randint
 import secrets
@@ -10,7 +11,8 @@ from agent_service import (
     extract_intent_from_message,
     format_phone_for_api, 
     format_phone_display,
-    create_booking_data
+    create_booking_data,
+    get_conversation_context
 )
 from agent_prompts import (
     get_welcome_message, 
@@ -18,11 +20,13 @@ from agent_prompts import (
     get_booking_confirmed_message, 
     detect_booking_intent,
     get_package_options,
+    get_agent_system_prompt,
     SERVICES
 )
+from prompts import get_base_system_prompt
 from memory_store import memory_store
 from database import booking_collection
-from config import TWILIO_WHATSAPP_FROM
+from config import TWILIO_WHATSAPP_FROM, GROQ_API_KEY
 from services import twilio_client
 
 router = APIRouter(prefix="/agent", tags=["Agent Chat"])
@@ -33,10 +37,9 @@ TEMP_OTP_STORE = {}
 @router.post("/chat", response_model=AgentChatResponse)
 async def agent_chat(req: AgentChatRequest):
     """
-    FIXED: Main agent chat with proper context awareness
+    ENHANCED: Agent with knowledge base integration and smart extraction
     """
     
-    # Validate language
     if req.language not in ["en", "ne", "hi", "mr"]:
         raise HTTPException(400, "Unsupported language")
     
@@ -114,34 +117,42 @@ async def agent_chat(req: AgentChatRequest):
         )
     
     # Detect booking intent in greeting stage
-    if memory.stage == "greeting" and detect_booking_intent(req.message, req.language):
-        memory.stage = "collecting_info"
-        welcome = get_welcome_message(req.language, is_booking=True)
-        
-        memory.add_message("user", req.message)
-        memory.add_message("assistant", welcome)
-        memory_store.update_memory(memory.session_id, memory)
-        
-        return AgentChatResponse(
-            reply=welcome,
-            session_id=memory.session_id,
-            stage=memory.stage,
-            action="continue",
-            missing_fields=memory.intent.missing_fields(),
-            collected_info={},
-            chat_mode="agent",
-            next_expected="service"
-        )
+    if memory.stage == "greeting":
+        if detect_booking_intent(req.message, req.language):
+            memory.stage = "collecting_info"
+            welcome = get_welcome_message(req.language, is_booking=True)
+            
+            memory.add_message("user", req.message)
+            memory.add_message("assistant", welcome)
+            memory_store.update_memory(memory.session_id, memory)
+            
+            return AgentChatResponse(
+                reply=welcome,
+                session_id=memory.session_id,
+                stage=memory.stage,
+                action="continue",
+                missing_fields=memory.intent.missing_fields(),
+                collected_info={},
+                chat_mode="agent",
+                next_expected="service"
+            )
+        else:
+            # Use AI with knowledge base for general queries
+            return await _handle_general_query(req.message, memory, req.language)
     
     # Handle OTP verification
     if memory.stage == "otp_sent":
         return await _handle_otp_verification(req.message, memory, req.language)
     
+    # Build conversation context
+    conv_context = get_conversation_context(memory)
+    
     # Extract intent with context awareness
     memory.intent = extract_intent_from_message(
         req.message, 
         memory.intent, 
-        memory.last_asked_field
+        memory.last_asked_field,
+        conv_context
     )
     
     # Get missing fields
@@ -156,7 +167,6 @@ async def agent_chat(req: AgentChatRequest):
         next_field = missing[0]
         reply = _get_field_question(next_field, memory.intent, req.language)
         
-        # Track what we asked for
         memory.last_asked_field = _get_field_key(next_field)
         
         memory.add_message("user", req.message)
@@ -174,9 +184,72 @@ async def agent_chat(req: AgentChatRequest):
             next_expected=memory.last_asked_field
         )
     
-    # Default greeting response
+    # Default fallback
     reply = get_welcome_message(req.language, is_booking=False)
     memory.add_message("user", req.message)
+    memory.add_message("assistant", reply)
+    memory_store.update_memory(memory.session_id, memory)
+    
+    return AgentChatResponse(
+        reply=reply,
+        session_id=memory.session_id,
+        stage=memory.stage,
+        action="continue",
+        missing_fields=[],
+        collected_info={},
+        chat_mode="normal"
+    )
+
+async def _handle_general_query(message: str, memory, language: str) -> AgentChatResponse:
+    """
+    Handle general queries using AI with knowledge base
+    """
+    # Get knowledge base system prompt
+    kb_prompt = get_base_system_prompt(language)
+    
+    # Build messages for AI
+    messages = [
+        {"role": "system", "content": kb_prompt},
+        {"role": "system", "content": f"You are helpful and answer in {language.upper()}. Keep responses concise (2-3 sentences)."}
+    ]
+    
+    # Add conversation history
+    for msg in memory.conversation_history[-4:]:
+        messages.append({
+            "role": msg["role"],
+            "content": msg["content"]
+        })
+    
+    # Add current message
+    messages.append({"role": "user", "content": message})
+    
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": messages,
+                "temperature": 0.4,
+                "max_tokens": 300
+            },
+            timeout=15,
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            reply = data["choices"][0]["message"]["content"]
+        else:
+            reply = get_welcome_message(language, is_booking=False)
+    
+    except Exception as e:
+        logger.error(f"AI query failed: {e}")
+        reply = get_welcome_message(language, is_booking=False)
+    
+    memory.add_message("user", message)
     memory.add_message("assistant", reply)
     memory_store.update_memory(memory.session_id, memory)
     
@@ -214,18 +287,28 @@ def _get_field_question(field: str, intent, language: str) -> str:
             "package choice": lambda: get_package_options(intent.service, language),
             "your name": "What's your full name?",
             "email address": "What's your email address?",
-            "phone number": "What's your phone number? (Include country code like +91 for India, +977 for Nepal)",
-            "service country": "Which country do you need the service in? (India, Nepal, Pakistan, Bangladesh, or Dubai)",
+            "phone number": "What's your phone number?\n(If different from service location, mention: 'I live in [country]' or use country code like +91, +977)",
+            "service country": "Which country do you need the makeup service in?\n(India, Nepal, Pakistan, Bangladesh, or Dubai)",
             "service address": "What's the complete address where you need the service?",
             "PIN/postal code": "What's the PIN/postal code of your location?",
-            "preferred date": "What's your preferred date? (Format: DD-MM-YYYY or 25th January 2026)"
+            "preferred date": "What's your preferred date?\n(Examples: '5th February 2026', '05-02-2026', 'February 5')"
+        },
+        "ne": {
+            "service type": "कुन प्रकारको मेकअप सेवा चाहिन्छ?\n\n1️⃣ ब्राइडल मेकअप\n2️⃣ पार्टी मेकअप\n3️⃣ इन्गेजमेन्ट र प्री-वेडिंग\n4️⃣ हेन्ना (मेहेन्दी)",
+            "package choice": lambda: get_package_options(intent.service, language),
+            "your name": "तपाईंको पूरा नाम के हो?",
+            "email address": "तपाईंको इमेल के हो?",
+            "phone number": "तपाईंको फोन नम्बर?\n(यदि सेवा स्थानभन्दा फरक छ भने: 'म [देश] मा बस्छु' वा +977 जस्तो कोड प्रयोग गर्नुहोस्)",
+            "service country": "कुन देशमा मेकअप सेवा चाहिन्छ?\n(भारत, नेपाल, पाकिस्तान, बंगलादेश, वा दुबई)",
+            "service address": "सेवाको लागि पूरा ठेगाना?",
+            "PIN/postal code": "तपाईंको PIN/postal कोड?",
+            "preferred date": "मिति कहिले चाहिन्छ?\n(उदाहरण: '५ फेब्रुअरी २०२६', '०५-०२-२०२६')"
         }
     }
     
     lang_questions = questions.get(language, questions["en"])
     question = lang_questions.get(field)
     
-    # If it's a lambda (like package), call it
     if callable(question):
         return question()
     
@@ -249,7 +332,7 @@ async def _send_otp_to_user(memory, language: str) -> AgentChatResponse:
             chat_mode="agent"
         )
     
-    # Show summary
+    # Show summary with proper formatting
     phone_display = format_phone_display(memory.intent.phone, phone_country)
     summary = memory.intent.get_summary()
     
@@ -257,6 +340,10 @@ async def _send_otp_to_user(memory, language: str) -> AgentChatResponse:
     for key, value in summary.items():
         if key == "Phone":
             confirmation += f"📱 {key}: {phone_display}\n"
+        elif key == "Phone Country":
+            confirmation += f"📍 Phone Location: {value}\n"
+        elif key == "Country":
+            confirmation += f"🌍 Service Location: {value}\n"
         else:
             confirmation += f"• {key}: {value}\n"
     
@@ -291,7 +378,7 @@ async def _send_otp_to_user(memory, language: str) -> AgentChatResponse:
         memory.add_message("assistant", reply)
         memory_store.update_memory(memory.session_id, memory)
         
-        logger.info(f"OTP sent to {phone} for booking {booking_id[:8]}...")
+        logger.info(f"OTP sent to {phone} (phone_country: {phone_country}) for booking {booking_id[:8]}...")
         
         return AgentChatResponse(
             reply=reply,

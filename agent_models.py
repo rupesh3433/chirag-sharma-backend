@@ -10,8 +10,8 @@ class BookingIntent(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
-    phone_country: Optional[str] = None
-    service_country: Optional[str] = None
+    phone_country: Optional[str] = None  # NEW: Where phone is registered
+    service_country: Optional[str] = None  # Where service is needed
     address: Optional[str] = None
     pincode: Optional[str] = None
     date: Optional[str] = None
@@ -87,6 +87,7 @@ class BookingIntent(BaseModel):
             "name": "Name",
             "email": "Email",
             "phone": "Phone",
+            "phone_country": "Phone Country",
             "service_country": "Country",
             "address": "Address",
             "pincode": "PIN Code",
