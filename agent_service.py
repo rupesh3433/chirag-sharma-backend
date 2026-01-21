@@ -30,6 +30,14 @@ def extract_intent_from_message(message: str, current_intent: BookingIntent, las
         if extracted is not None:
             setattr(updated, last_asked_field, extracted)
             logger.info(f"Extracted {last_asked_field}: {extracted}")
+            
+            # Special handling for phone - also extract country
+            if last_asked_field == "phone":
+                phone_data = _extract_phone_smart(message, conversation_context)
+                if isinstance(phone_data, dict) and phone_data.get('country'):
+                    updated.phone_country = phone_data.get('country')
+                    logger.info(f"Extracted phone_country: {phone_data.get('country')}")
+            
             return updated
     
     # General multi-field extraction
@@ -37,7 +45,7 @@ def extract_intent_from_message(message: str, current_intent: BookingIntent, las
     
     return updated
 
-def _extract_by_context(message: str, field: str, current_intent: BookingIntent, context: str = "") -> Optional[str]:
+def _extract_by_context(message: str, field: str, current_intent: BookingIntent, context: str = "") -> Optional[Any]:
     """Extract specific field based on what was asked with full context awareness"""
     
     if field == "service":
@@ -53,7 +61,11 @@ def _extract_by_context(message: str, field: str, current_intent: BookingIntent,
         return _extract_email(message)
     
     elif field == "phone":
-        return _extract_phone_smart(message, context)
+        # Return just the phone number string
+        phone_data = _extract_phone_smart(message, context)
+        if isinstance(phone_data, dict):
+            return phone_data.get('phone')
+        return phone_data
     
     elif field == "service_country":
         return _extract_country_smart(message, context, "service")
@@ -102,7 +114,8 @@ def _extract_all_fields(message: str, current_intent: BookingIntent, context: st
         if phone_data:
             if isinstance(phone_data, dict):
                 current_intent.phone = phone_data.get('phone')
-                current_intent.phone_country = phone_data.get('country')
+                if phone_data.get('country'):
+                    current_intent.phone_country = phone_data.get('country')
             else:
                 current_intent.phone = phone_data
     
