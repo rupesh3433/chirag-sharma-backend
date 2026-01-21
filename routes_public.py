@@ -11,6 +11,7 @@ from database import booking_collection
 from services import send_whatsapp_message, twilio_client
 from config import TWILIO_WHATSAPP_FROM
 from prompts import get_base_system_prompt, get_language_reset_prompt
+from rate_limiter import rate_limiter  # Import rate limiter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -29,11 +30,20 @@ async def health():
 
 @router.post("/chat")
 async def chat(req: ChatRequest):
-    """Public chatbot endpoint"""
+    """Public chatbot endpoint with retry logic"""
     
     language_name = LANGUAGE_MAP.get(req.language)
     if not language_name:
         raise HTTPException(status_code=400, detail="Unsupported language")
+    
+    # Rate limiting - use hash of first user message as key
+    rate_limit_key = "chat_" + str(hash(str(req.messages[0].content if req.messages else "anon")))[:10]
+    if not rate_limiter.check_rate_limit(rate_limit_key):
+        remaining_time = int(rate_limiter.get_reset_time(rate_limit_key))
+        raise HTTPException(
+            429, 
+            f"Too many requests. Please wait {remaining_time} seconds."
+        )
 
     language_reset_prompt = get_language_reset_prompt(req.language)
 
@@ -48,49 +58,76 @@ async def chat(req: ChatRequest):
     for msg in req.messages:
         messages_for_ai.append(msg.dict())
 
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": messages_for_ai,
-                "temperature": 0.4,
-            },
-            timeout=20,
-        )
-        
-        # Check response status
-        if response.status_code != 200:
-            logger.error(f"GROQ API error {response.status_code}: {response.text}")
-            raise HTTPException(status_code=500, detail="AI service temporarily unavailable")
-        
-        data = response.json()
-        
-        # Validate response structure
-        if "choices" not in data or not data["choices"]:
-            logger.error(f"GROQ API invalid response: {data}")
-            raise HTTPException(status_code=500, detail="AI service returned invalid response")
-        
-        return {
-            "reply": data["choices"][0]["message"]["content"]
-        }
-        
-    except requests.exceptions.Timeout:
-        logger.error("GROQ API timeout")
-        raise HTTPException(status_code=504, detail="AI service timeout")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"GROQ API request failed: {e}")
-        raise HTTPException(status_code=500, detail="AI service unavailable")
-    except KeyError as e:
-        logger.error(f"GROQ API response parsing error: {e}")
-        raise HTTPException(status_code=500, detail="AI service error")
-    except Exception as e:
-        logger.error(f"Unexpected error in chat: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    # Retry logic for GROQ rate limits
+    max_retries = 3
+    retry_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": messages_for_ai,
+                    "temperature": 0.4,
+                    "max_tokens": 250,  # Reduced to save tokens
+                },
+                timeout=20,
+            )
+            
+            # Check response status
+            if response.status_code == 429:
+                # Rate limited by GROQ
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)
+                    logger.warning(f"GROQ rate limit hit, retrying in {wait_time}s...")
+                    import time
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"GROQ API rate limit after {max_retries} retries")
+                    raise HTTPException(
+                        429, 
+                        "AI service is busy. Please try again in a few seconds."
+                    )
+            
+            if response.status_code != 200:
+                logger.error(f"GROQ API error {response.status_code}: {response.text}")
+                raise HTTPException(500, "AI service temporarily unavailable")
+            
+            data = response.json()
+            
+            # Validate response structure
+            if "choices" not in data or not data["choices"]:
+                logger.error(f"GROQ API invalid response: {data}")
+                raise HTTPException(500, "AI service returned invalid response")
+            
+            return {
+                "reply": data["choices"][0]["message"]["content"]
+            }
+            
+        except requests.exceptions.Timeout:
+            logger.error("GROQ API timeout")
+            if attempt < max_retries - 1:
+                continue
+            raise HTTPException(504, "AI service timeout")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"GROQ API request failed: {e}")
+            if attempt < max_retries - 1:
+                continue
+            raise HTTPException(500, "AI service unavailable")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in chat: {e}")
+            raise HTTPException(500, "Internal server error")
+    
+    # Should not reach here
+    raise HTTPException(500, "Failed after retries")
 
 @router.post("/bookings/request")
 async def request_booking(booking: BookingRequest):
