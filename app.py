@@ -8,6 +8,8 @@ from routes_admin_auth import router as admin_auth_router
 from routes_admin_bookings import router as admin_bookings_router
 from routes_admin_knowledge import router as admin_knowledge_router
 from routes_admin_analytics import router as admin_analytics_router
+from routes_agent import router as agent_router
+
 
 # ----------------------
 # Basic Logging
@@ -37,6 +39,9 @@ app.add_middleware(
 
 # Public Routes
 app.include_router(public_router)
+
+# Agent Routes
+app.include_router(agent_router)
 
 # Admin Routes
 app.include_router(admin_auth_router)
