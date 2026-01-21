@@ -1,507 +1,466 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List, Tuple, Dict, Any
 import logging
 import re
-import requests
 from datetime import datetime, timedelta
 from random import randint
 import secrets
 
-from config import LANGUAGE_MAP, TWILIO_WHATSAPP_FROM, GROQ_API_KEY, COUNTRY_CODES
-from agent_models import ConversationMemory, AgentResponse
-from agent_service import generate_agent_response, get_missing_fields, format_phone_with_country_code
-from memory_store import create_session, get_memory, update_memory, delete_memory
-from services import twilio_client
+from agent_models import AgentChatRequest, AgentChatResponse
+from agent_service import (
+    extract_intent_from_message,
+    format_phone_for_api, 
+    format_phone_display,
+    create_booking_data
+)
+from agent_prompts import (
+    get_welcome_message, 
+    get_otp_sent_message, 
+    get_booking_confirmed_message, 
+    detect_booking_intent,
+    get_package_options,
+    SERVICES
+)
+from memory_store import memory_store
 from database import booking_collection
-from prompts import get_base_system_prompt, get_language_reset_prompt
+from config import TWILIO_WHATSAPP_FROM
+from services import twilio_client
 
 router = APIRouter(prefix="/agent", tags=["Agent Chat"])
 logger = logging.getLogger(__name__)
 
-# Temporary OTP storage for agent bookings
-AGENT_BOOKING_OTPS = {}
-
-# ==========================================================
-# REQUEST/RESPONSE MODELS
-# ==========================================================
-
-class AgentChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    language: str  # en | ne | hi | mr
-
-class AgentChatResponse(BaseModel):
-    reply: str
-    session_id: str
-    stage: str
-    action: str
-    missing_fields: List[str]
-    booking_id: Optional[str] = None
-    chat_mode: str = "agent"  # Add this field
-
-# ==========================================================
-# HELPER: Normal Chat (Reusing routes_public.py logic)
-# ==========================================================
-
-def get_normal_chat_response(messages: List[Dict], language: str) -> str:
-    """Reuse the normal chat logic from routes_public.py"""
-    
-    language_reset_prompt = get_language_reset_prompt(language)
-    base_prompt = get_base_system_prompt(language)
-    
-    messages_for_ai = [
-        {"role": "system", "content": base_prompt},
-        {"role": "system", "content": language_reset_prompt},
-    ]
-    
-    for msg in messages:
-        messages_for_ai.append(msg)
-    
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "llama-3.1-8b-instant",
-                    "messages": messages_for_ai,
-                    "temperature": 0.4,
-                    "max_tokens": 500
-                },
-                timeout=15,
-            )
-            
-            if response.status_code == 429:
-                wait_time = 2 ** (attempt + 1)
-                import time
-                time.sleep(wait_time)
-                continue
-            elif response.status_code != 200:
-                return "I'm having trouble connecting. Please try again."
-            
-            data = response.json()
-            
-            if "choices" not in data or len(data["choices"]) == 0:
-                return "I'm having trouble processing that. Please try again."
-            
-            return data["choices"][0]["message"]["content"]
-            
-        except Exception as e:
-            logger.error(f"Normal chat attempt {attempt + 1} failed: {e}")
-            if attempt == max_retries - 1:
-                return "Sorry, I'm having technical difficulties. Please try again."
-    
-    return "Sorry, I'm having technical difficulties. Please try again."
-
-# ==========================================================
-# AGENT ROUTES
-# ==========================================================
+TEMP_OTP_STORE = {}
 
 @router.post("/chat", response_model=AgentChatResponse)
 async def agent_chat(req: AgentChatRequest):
     """
-    Intelligent chatbot that switches between normal chat and booking mode
+    FIXED: Main agent chat with proper context awareness
     """
     
     # Validate language
-    if req.language not in LANGUAGE_MAP:
-        raise HTTPException(status_code=400, detail="Unsupported language")
+    if req.language not in ["en", "ne", "hi", "mr"]:
+        raise HTTPException(400, "Unsupported language")
     
     # Get or create session
-    session_id = req.session_id
-    memory = None
-    
-    if session_id:
-        memory = get_memory(session_id)
-    
+    memory = memory_store.get_memory(req.session_id) if req.session_id else None
     if not memory:
-        # Create new session
-        session_id = create_session(req.language)
-        memory = get_memory(session_id)
+        session_id = memory_store.create_session(req.language)
+        memory = memory_store.get_memory(session_id)
     
     msg_lower = req.message.lower().strip()
     
-    # Detect if user wants to exit booking mode
-    exit_keywords = [
-        "cancel", "stop", "exit", "quit", "go back", "normal chat", 
-        "normal mode", "don't want to book", "dont want to book",
-        "i don't want", "i dont want", "no booking", "forget it",
-        "nevermind", "never mind", "not interested"
-    ]
+    # Handle special commands
+    if any(word in msg_lower for word in ["exit", "cancel", "stop"]):
+        if memory.stage != "greeting":
+            memory_store.reset_memory(memory.session_id)
+            memory = memory_store.get_memory(memory.session_id)
+            return AgentChatResponse(
+                reply="✅ Booking cancelled. How else can I help?",
+                session_id=memory.session_id,
+                stage=memory.stage,
+                action="reset",
+                missing_fields=[],
+                collected_info={},
+                chat_mode="normal"
+            )
     
-    if any(keyword in msg_lower for keyword in exit_keywords):
-        # Reset to normal chat mode
-        delete_memory(session_id)
-        session_id = create_session(req.language)
-        memory = get_memory(session_id)
-        
-        # Use normal chat
-        chat_messages = [{"role": "user", "content": "I want to just chat, not book anything."}]
-        reply = get_normal_chat_response(chat_messages, req.language)
-        
-        return AgentChatResponse(
-            reply=reply,
-            session_id=session_id,
-            stage="greeting",
-            action="continue",
-            missing_fields=[],
-            booking_id=None,
-            chat_mode="normal"
-        )
-    
-    # Check if user wants to restart booking
-    restart_keywords = ["start over", "restart", "reset", "begin again", "do from start", "book again", "new booking"]
-    if any(keyword in msg_lower for keyword in restart_keywords):
-        # Reset session
-        delete_memory(session_id)
-        session_id = create_session(req.language)
-        memory = get_memory(session_id)
+    if any(word in msg_lower for word in ["restart", "start over"]):
+        memory_store.reset_memory(memory.session_id)
+        memory = memory_store.get_memory(memory.session_id)
         memory.stage = "collecting_info"
-        update_memory(session_id, memory)
+        memory_store.update_memory(memory.session_id, memory)
         
-        service_options = (
-            "Let's start fresh! Please select a service:\n"
-            "1. Bridal Makeup Services\n"
-            "2. Party Makeup Services\n"
-            "3. Engagement & Pre-Wedding Makeup\n"
-            "4. Henna (Mehendi) Services"
-        )
+        welcome = get_welcome_message(req.language, is_booking=True)
+        memory.add_message("user", req.message)
+        memory.add_message("assistant", welcome)
+        memory_store.update_memory(memory.session_id, memory)
         
         return AgentChatResponse(
-            reply=service_options,
-            session_id=session_id,
-            stage="collecting_info",
+            reply=welcome,
+            session_id=memory.session_id,
+            stage=memory.stage,
             action="continue",
-            missing_fields=get_missing_fields(memory.intent),
-            booking_id=None,
+            missing_fields=memory.intent.missing_fields(),
+            collected_info=memory.intent.get_summary(),
             chat_mode="agent"
         )
     
-    # Detect booking intent
-    booking_keywords = [
-        "book", "booking", "appointment", "schedule", "reserve",
-        "i want", "i need", "looking for", "interested in", "would like",
-        "bridal", "party", "engagement", "henna", "mehendi", "makeup", "service"
-    ]
-    
-    has_booking_intent = any(keyword in msg_lower for keyword in booking_keywords)
-    
-    # Special: If user says "My details are:" or similar, treat as booking
-    if "my details" in msg_lower or "details are" in msg_lower:
-        has_booking_intent = True
-    
-    # If in greeting stage and no booking intent, use normal chat
-    if memory.stage == "greeting" and not has_booking_intent:
-        # Build conversation history for normal chat
-        chat_messages = []
-        for msg in memory.conversation_history[-4:]:
-            chat_messages.append(msg)
-        chat_messages.append({"role": "user", "content": req.message})
+    # Check if user wants to see collected info
+    if "what information" in msg_lower or "what do you have" in msg_lower or "collected info" in msg_lower:
+        summary = memory.intent.get_summary()
+        missing = memory.intent.missing_fields()
         
-        reply = get_normal_chat_response(chat_messages, req.language)
+        if summary:
+            reply = "**Information I have collected:**\n\n"
+            for key, value in summary.items():
+                reply += f"• {key}: {value}\n"
+            
+            if missing:
+                reply += f"\n**Still need:** {', '.join(missing)}"
+        else:
+            reply = "I haven't collected any information yet. Let's start booking!"
         
-        # Update memory
-        memory.conversation_history.append({"role": "user", "content": req.message})
-        memory.conversation_history.append({"role": "assistant", "content": reply})
-        update_memory(session_id, memory)
+        memory.add_message("user", req.message)
+        memory.add_message("assistant", reply)
+        memory_store.update_memory(memory.session_id, memory)
         
         return AgentChatResponse(
             reply=reply,
-            session_id=session_id,
-            stage="greeting",
+            session_id=memory.session_id,
+            stage=memory.stage,
             action="continue",
-            missing_fields=[],
-            booking_id=None,
-            chat_mode="normal"
+            missing_fields=missing,
+            collected_info=summary,
+            chat_mode="agent" if memory.stage != "greeting" else "normal"
         )
     
-    # User has booking intent or already in booking flow
-    if has_booking_intent and memory.stage == "greeting":
+    # Detect booking intent in greeting stage
+    if memory.stage == "greeting" and detect_booking_intent(req.message, req.language):
         memory.stage = "collecting_info"
-        update_memory(session_id, memory)
+        welcome = get_welcome_message(req.language, is_booking=True)
+        
+        memory.add_message("user", req.message)
+        memory.add_message("assistant", welcome)
+        memory_store.update_memory(memory.session_id, memory)
+        
+        return AgentChatResponse(
+            reply=welcome,
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="continue",
+            missing_fields=memory.intent.missing_fields(),
+            collected_info={},
+            chat_mode="agent",
+            next_expected="service"
+        )
     
-    # Generate agent response for booking
-    reply, updated_memory, action = generate_agent_response(
-        req.message,
-        memory,
-        req.language
+    # Handle OTP verification
+    if memory.stage == "otp_sent":
+        return await _handle_otp_verification(req.message, memory, req.language)
+    
+    # Extract intent with context awareness
+    memory.intent = extract_intent_from_message(
+        req.message, 
+        memory.intent, 
+        memory.last_asked_field
     )
     
-    # Handle actions
-    booking_id = None
-    
-    if action == "send_otp":
-        # All information collected, send OTP
-        booking_id, otp_reply = await send_otp_to_user(updated_memory, req.language)
-        if booking_id:
-            updated_memory.booking_id = booking_id
-            reply = f"{reply}\n\n{otp_reply}"
-            # Clear conversation history to keep it clean
-            updated_memory.conversation_history = []
-        else:
-            # Failed to send OTP
-            updated_memory.stage = "collecting_info"
-            action = "continue"
-    
-    elif action == "verify_otp":
-        # User provided OTP, verify it
-        otp_match = re.search(r'\b\d{6}\b', req.message)
-        if otp_match:
-            otp = otp_match.group(0)
-            verification_result = await verify_user_otp(
-                updated_memory.booking_id,
-                otp,
-                updated_memory,
-                req.language
-            )
-            
-            if verification_result["success"]:
-                reply = verification_result["message"]
-                updated_memory.stage = "confirmed"
-                action = "booking_confirmed"
-                # Clean up memory after successful booking
-                delete_memory(session_id)
-            else:
-                reply = verification_result["message"]
-                updated_memory.otp_attempts += 1
-                
-                # Allow max 3 attempts
-                if updated_memory.otp_attempts >= 3:
-                    reply += "\n\n" + get_max_attempts_message(req.language)
-                    updated_memory.stage = "collecting_info"
-                    updated_memory.booking_id = None
-                    updated_memory.otp_attempts = 0
-        else:
-            reply = "Please provide a valid 6-digit OTP."
-    
-    # Update memory
-    update_memory(session_id, updated_memory)
-    
     # Get missing fields
-    missing_fields = get_missing_fields(updated_memory.intent)
+    missing = memory.intent.missing_fields()
     
-    # Determine chat mode based on stage
-    chat_mode = "agent" if updated_memory.stage != "greeting" else "normal"
+    # If all info collected, send OTP
+    if not missing and memory.stage == "collecting_info":
+        return await _send_otp_to_user(memory, req.language)
+    
+    # Still collecting info - ask for next field
+    if missing and memory.stage == "collecting_info":
+        next_field = missing[0]
+        reply = _get_field_question(next_field, memory.intent, req.language)
+        
+        # Track what we asked for
+        memory.last_asked_field = _get_field_key(next_field)
+        
+        memory.add_message("user", req.message)
+        memory.add_message("assistant", reply)
+        memory_store.update_memory(memory.session_id, memory)
+        
+        return AgentChatResponse(
+            reply=reply,
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="continue",
+            missing_fields=missing,
+            collected_info=memory.intent.get_summary(),
+            chat_mode="agent",
+            next_expected=memory.last_asked_field
+        )
+    
+    # Default greeting response
+    reply = get_welcome_message(req.language, is_booking=False)
+    memory.add_message("user", req.message)
+    memory.add_message("assistant", reply)
+    memory_store.update_memory(memory.session_id, memory)
     
     return AgentChatResponse(
         reply=reply,
-        session_id=session_id,
-        stage=updated_memory.stage,
-        action=action,
-        missing_fields=missing_fields,
-        booking_id=booking_id,
-        chat_mode=chat_mode
+        session_id=memory.session_id,
+        stage=memory.stage,
+        action="continue",
+        missing_fields=[],
+        collected_info={},
+        chat_mode="normal"
     )
 
-# ==========================================================
-# HELPER FUNCTIONS
-# ==========================================================
+def _get_field_key(field_label: str) -> str:
+    """Convert field label to key"""
+    mapping = {
+        "service type": "service",
+        "package choice": "package",
+        "your name": "name",
+        "email address": "email",
+        "phone number": "phone",
+        "service country": "service_country",
+        "service address": "address",
+        "PIN/postal code": "pincode",
+        "preferred date": "date"
+    }
+    return mapping.get(field_label, field_label.replace(" ", "_"))
 
-async def send_otp_to_user(memory: ConversationMemory, language: str) -> Tuple[Optional[str], str]:
-    """Send OTP to user's WhatsApp"""
+def _get_field_question(field: str, intent, language: str) -> str:
+    """Generate appropriate question for each field"""
     
-    intent = memory.intent
+    questions = {
+        "en": {
+            "service type": "What type of makeup service would you like?\n\n1️⃣ Bridal Makeup\n2️⃣ Party Makeup\n3️⃣ Engagement & Pre-Wedding\n4️⃣ Henna (Mehendi)\n\nReply with number or service name:",
+            "package choice": lambda: get_package_options(intent.service, language),
+            "your name": "What's your full name?",
+            "email address": "What's your email address?",
+            "phone number": "What's your phone number? (Include country code like +91 for India, +977 for Nepal)",
+            "service country": "Which country do you need the service in? (India, Nepal, Pakistan, Bangladesh, or Dubai)",
+            "service address": "What's the complete address where you need the service?",
+            "PIN/postal code": "What's the PIN/postal code of your location?",
+            "preferred date": "What's your preferred date? (Format: DD-MM-YYYY or 25th January 2026)"
+        }
+    }
     
-    # Validate required fields
-    if not intent.phone:
-        return None, "Phone number is required."
+    lang_questions = questions.get(language, questions["en"])
+    question = lang_questions.get(field)
     
-    # Format phone with country code
-    phone = format_phone_with_country_code(intent.phone, intent.phone_country)
+    # If it's a lambda (like package), call it
+    if callable(question):
+        return question()
     
-    # Validate phone format
-    if not re.match(r"^\+\d{10,15}$", phone):
-        return None, get_invalid_phone_message(language)
+    return question or f"Please provide your {field}."
+
+async def _send_otp_to_user(memory, language: str) -> AgentChatResponse:
+    """Send OTP when all info is collected"""
+    
+    # Validate phone
+    phone_country = memory.intent.phone_country or memory.intent.service_country or "India"
+    phone = format_phone_for_api(memory.intent.phone, phone_country)
+    
+    if not phone or not phone.startswith("+"):
+        return AgentChatResponse(
+            reply="❌ Invalid phone number. Please provide a valid phone number with country code.",
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="continue",
+            missing_fields=["phone number"],
+            collected_info=memory.intent.get_summary(),
+            chat_mode="agent"
+        )
+    
+    # Show summary
+    phone_display = format_phone_display(memory.intent.phone, phone_country)
+    summary = memory.intent.get_summary()
+    
+    confirmation = "✅ **Booking Summary:**\n\n"
+    for key, value in summary.items():
+        if key == "Phone":
+            confirmation += f"📱 {key}: {phone_display}\n"
+        else:
+            confirmation += f"• {key}: {value}\n"
+    
+    confirmation += "\n🔐 Sending OTP for verification..."
     
     # Generate OTP
     otp = str(randint(100000, 999999))
-    expires_at = datetime.utcnow() + timedelta(minutes=5)
-    
-    # Create booking ID
     booking_id = secrets.token_urlsafe(16)
     
-    # Store OTP and booking data
-    AGENT_BOOKING_OTPS[booking_id] = {
+    TEMP_OTP_STORE[booking_id] = {
         "otp": otp,
-        "expires_at": expires_at,
-        "booking_data": {
-            "service": intent.service,
-            "package": intent.package,
-            "name": intent.name,
-            "email": intent.email,
-            "phone": phone,
-            "phone_country": intent.phone_country,
-            "service_country": intent.service_country,
-            "address": intent.address,
-            "pincode": intent.pincode,
-            "date": intent.date,
-            "message": intent.message,
-            "language": memory.language
-        }
+        "expires_at": datetime.utcnow() + timedelta(minutes=5),
+        "booking_data": create_booking_data(memory),
+        "session_id": memory.session_id
     }
     
-    # Send OTP via WhatsApp
-    if not twilio_client:
-        logger.error("Twilio client not initialized")
-        AGENT_BOOKING_OTPS.pop(booking_id, None)
-        return None, get_otp_failed_message(language)
-    
+    # Send WhatsApp
     try:
-        # Send OTP message
         twilio_client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
             to=f"whatsapp:{phone}",
-            body=f"Your JinniChirag booking OTP is {otp}"
+            body=f"Your JinniChirag booking OTP is {otp}. Valid for 5 minutes."
         )
         
-        logger.info(f"OTP sent to {phone} for agent booking {booking_id}")
-        return booking_id, get_otp_sent_message(language)
+        memory.stage = "otp_sent"
+        memory.booking_id = booking_id
+        memory.last_asked_field = "otp"
+        
+        otp_msg = get_otp_sent_message(language, phone_display)
+        reply = f"{confirmation}\n\n{otp_msg}"
+        
+        memory.add_message("assistant", reply)
+        memory_store.update_memory(memory.session_id, memory)
+        
+        logger.info(f"OTP sent to {phone} for booking {booking_id[:8]}...")
+        
+        return AgentChatResponse(
+            reply=reply,
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="send_otp",
+            missing_fields=[],
+            collected_info=summary,
+            booking_id=booking_id,
+            chat_mode="agent",
+            next_expected="otp"
+        )
         
     except Exception as e:
-        logger.error(f"Failed to send OTP to {phone}: {e}")
-        AGENT_BOOKING_OTPS.pop(booking_id, None)
-        return None, get_otp_failed_message(language)
+        logger.error(f"Failed to send OTP: {e}")
+        TEMP_OTP_STORE.pop(booking_id, None)
+        
+        return AgentChatResponse(
+            reply="❌ Failed to send OTP. Please verify your phone number and try again.",
+            session_id=memory.session_id,
+            stage="collecting_info",
+            action="continue",
+            missing_fields=["phone number"],
+            collected_info=summary,
+            chat_mode="agent"
+        )
 
-async def verify_user_otp(
-    booking_id: str,
-    otp: str,
-    memory: ConversationMemory,
-    language: str
-) -> Dict[str, Any]:
-    """Verify OTP and create booking"""
+async def _handle_otp_verification(otp_message: str, memory, language: str) -> AgentChatResponse:
+    """Handle OTP verification"""
     
-    if not booking_id:
-        return {
-            "success": False,
-            "message": get_invalid_booking_message(language)
-        }
+    otp_match = re.search(r'\b\d{6}\b', otp_message)
     
-    temp = AGENT_BOOKING_OTPS.get(booking_id)
+    if not otp_match:
+        reply = "Please enter the 6-digit OTP sent to your WhatsApp."
+        memory.add_message("user", otp_message)
+        memory.add_message("assistant", reply)
+        memory_store.update_memory(memory.session_id, memory)
+        
+        return AgentChatResponse(
+            reply=reply,
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="continue",
+            missing_fields=[],
+            collected_info=memory.intent.get_summary(),
+            booking_id=memory.booking_id,
+            chat_mode="agent"
+        )
     
-    if not temp:
-        return {
-            "success": False,
-            "message": get_invalid_booking_message(language)
-        }
+    otp = otp_match.group(0)
+    temp_data = TEMP_OTP_STORE.get(memory.booking_id)
     
-    if datetime.utcnow() > temp["expires_at"]:
-        AGENT_BOOKING_OTPS.pop(booking_id, None)
-        return {
-            "success": False,
-            "message": get_otp_expired_message(language)
-        }
+    if not temp_data:
+        memory_store.delete_memory(memory.session_id)
+        return AgentChatResponse(
+            reply="❌ OTP expired or invalid. Please start a new booking.",
+            session_id=memory_store.create_session(language),
+            stage="greeting",
+            action="reset",
+            missing_fields=[],
+            collected_info={},
+            chat_mode="normal"
+        )
     
-    if otp != temp["otp"]:
-        return {
-            "success": False,
-            "message": get_invalid_otp_message(language)
-        }
+    if datetime.utcnow() > temp_data["expires_at"]:
+        TEMP_OTP_STORE.pop(memory.booking_id, None)
+        memory_store.delete_memory(memory.session_id)
+        
+        return AgentChatResponse(
+            reply="⏰ OTP expired (5 min limit). Please start a new booking.",
+            session_id=memory_store.create_session(language),
+            stage="greeting",
+            action="reset",
+            missing_fields=[],
+            collected_info={},
+            chat_mode="normal"
+        )
     
-    # ✅ OTP VERIFIED → SAVE TO DB
-    booking_data = temp["booking_data"]
-    booking_data.update({
-        "status": "pending",
-        "otp_verified": True,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-        "source": "agent_chat",
-        "session_id": memory.session_id
-    })
+    if otp != temp_data["otp"]:
+        memory.otp_attempts += 1
+        memory_store.update_memory(memory.session_id, memory)
+        
+        if memory.otp_attempts >= 3:
+            TEMP_OTP_STORE.pop(memory.booking_id, None)
+            memory_store.delete_memory(memory.session_id)
+            
+            return AgentChatResponse(
+                reply="❌ Too many failed attempts. Please start a new booking.",
+                session_id=memory_store.create_session(language),
+                stage="greeting",
+                action="reset",
+                missing_fields=[],
+                collected_info={},
+                chat_mode="normal"
+            )
+        
+        reply = f"❌ Invalid OTP. {3 - memory.otp_attempts} attempt(s) left."
+        memory.add_message("user", otp_message)
+        memory.add_message("assistant", reply)
+        memory_store.update_memory(memory.session_id, memory)
+        
+        return AgentChatResponse(
+            reply=reply,
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="continue",
+            missing_fields=[],
+            collected_info=memory.intent.get_summary(),
+            booking_id=memory.booking_id,
+            chat_mode="agent"
+        )
+    
+    # ✅ OTP VERIFIED
+    booking_data = temp_data["booking_data"]
+    booking_data["otp_verified"] = True
+    booking_data["verified_at"] = datetime.utcnow()
     
     try:
         result = booking_collection.insert_one(booking_data)
-        AGENT_BOOKING_OTPS.pop(booking_id, None)
+        TEMP_OTP_STORE.pop(memory.booking_id, None)
         
-        logger.info(f"Agent booking confirmed: {result.inserted_id}")
+        logger.info(f"✅ Booking confirmed: {result.inserted_id}")
         
-        return {
-            "success": True,
-            "message": get_booking_confirmed_message(language, memory.intent.name)
-        }
+        name = memory.intent.name or "Customer"
+        success_msg = get_booking_confirmed_message(language, name)
+        
+        memory_store.delete_memory(memory.session_id)
+        
+        return AgentChatResponse(
+            reply=success_msg,
+            session_id=memory_store.create_session(language),
+            stage="greeting",
+            action="booking_confirmed",
+            missing_fields=[],
+            collected_info={},
+            booking_id=str(result.inserted_id),
+            chat_mode="normal"
+        )
+        
     except Exception as e:
         logger.error(f"Failed to save booking: {e}")
-        return {
-            "success": False,
-            "message": "Failed to save booking. Please try again."
-        }
+        
+        return AgentChatResponse(
+            reply="❌ Failed to save booking. Please contact support.",
+            session_id=memory.session_id,
+            stage=memory.stage,
+            action="continue",
+            missing_fields=[],
+            collected_info=memory.intent.get_summary(),
+            booking_id=memory.booking_id,
+            chat_mode="agent"
+        )
 
-# ==========================================================
-# LOCALIZED MESSAGES
-# ==========================================================
+@router.get("/sessions")
+async def get_session_stats():
+    """Get session statistics"""
+    stats = memory_store.get_stats()
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat(), **stats}
 
-def get_otp_sent_message(language: str) -> str:
-    messages = {
-        "en": "✅ I've sent a 6-digit OTP to your WhatsApp. Please share it here to confirm.",
-        "ne": "✅ मैले तपाईंको व्हाट्सएपमा ६-अङ्कको OTP पठाएको छु। कृपया यहाँ साझा गर्नुहोस्।",
-        "hi": "✅ मैंने आपके व्हाट्सएप पर 6-अंकों का OTP भेजा है। कृपया यहाँ शेयर करें।",
-        "mr": "✅ मी तुमच्या व्हाट्सअॅपवर 6-अंकी OTP पाठवला आहे. कृपया येथे शेअर करा."
-    }
-    return messages.get(language, messages["en"])
+@router.post("/cleanup")
+async def force_cleanup():
+    """Force cleanup expired sessions"""
+    cleaned = memory_store.cleanup_old_sessions()
+    return {"status": "ok", "cleaned": cleaned}
 
-def get_invalid_phone_message(language: str) -> str:
-    messages = {
-        "en": "❌ Invalid phone format. Please provide a valid number with country code.",
-        "ne": "❌ अवैध फोन ढाँचा। कृपया देश कोडसहित मान्य नम्बर प्रदान गर्नुहोस्।",
-        "hi": "❌ अमान्य फ़ोन फॉर्मेट। कृपया देश कोड के साथ मान्य नंबर प्रदान करें।",
-        "mr": "❌ अवैध फोन फॉरमॅट. कृपया देश कोडसह वैध नंबर प्रदान करा."
-    }
-    return messages.get(language, messages["en"])
-
-def get_otp_failed_message(language: str) -> str:
-    messages = {
-        "en": "❌ Couldn't send OTP. Please check your phone number.",
-        "ne": "❌ OTP पठाउन सकिएन। कृपया आफ्नो फोन नम्बर जाँच गर्नुहोस्।",
-        "hi": "❌ OTP नहीं भेज सका। कृपया अपना फ़ोन नंबर जाँचें।",
-        "mr": "❌ OTP पाठवू शकलो नाही. कृपया तुमचा फोन नंबर तपासा."
-    }
-    return messages.get(language, messages["en"])
-
-def get_invalid_booking_message(language: str) -> str:
-    messages = {
-        "en": "❌ Invalid or expired booking. Please start over.",
-        "ne": "❌ अवैध वा म्याद सकिएको बुकिङ। कृपया फेरि सुरु गर्नुहोस्।",
-        "hi": "❌ अमान्य या समाप्त बुकिंग। कृपया फिर से शुरू करें।",
-        "mr": "❌ अवैध किंवा कालबाह्य बुकिंग. कृपया पुन्हा सुरू करा."
-    }
-    return messages.get(language, messages["en"])
-
-def get_otp_expired_message(language: str) -> str:
-    messages = {
-        "en": "❌ OTP expired. Please request a new one.",
-        "ne": "❌ OTP को म्याद समाप्त भयो। कृपया नयाँ अनुरोध गर्नुहोस्।",
-        "hi": "❌ OTP समाप्त हो गया। कृपया नया अनुरोध करें।",
-        "mr": "❌ OTP कालबाह्य झाला. कृपया नवीन विनंती करा."
-    }
-    return messages.get(language, messages["en"])
-
-def get_invalid_otp_message(language: str) -> str:
-    messages = {
-        "en": "❌ Invalid OTP. Please try again.",
-        "ne": "❌ अवैध OTP। कृपया पुन: प्रयास गर्नुहोस्।",
-        "hi": "❌ अमान्य OTP। कृपया पुनः प्रयास करें।",
-        "mr": "❌ अवैध OTP. कृपया पुन्हा प्रयत्न करा."
-    }
-    return messages.get(language, messages["en"])
-
-def get_max_attempts_message(language: str) -> str:
-    messages = {
-        "en": "Maximum attempts exceeded. Let's start fresh!",
-        "ne": "अधिकतम प्रयास पार भयो। नयाँ सुरु गरौं!",
-        "hi": "अधिकतम प्रयास पार हो गए। नए सिरे से शुरू करें!",
-        "mr": "जास्तीत जास्त प्रयत्न पार झाले. नव्याने सुरुवात करूया!"
-    }
-    return messages.get(language, messages["en"])
-
-def get_booking_confirmed_message(language: str, name: str) -> str:
-    messages = {
-        "en": f"🎉 Congratulations {name}! Your booking request is submitted!\n\n📋 Our admin will review and send WhatsApp confirmation once approved.\n\nThank you for choosing JinniChirag! 💄✨",
-        "ne": f"🎉 बधाई छ {name}! तपाईंको बुकिङ अनुरोध पेश गरिएको छ!\n\n📋 प्रशासकले समीक्षा गर्नेछ र स्वीकृत भएपछि व्हाट्सएप पुष्टि पठाउनेछ।\n\nJinniChirag छनोट गर्नुभएकोमा धन्यवाद! 💄✨",
-        "hi": f"🎉 बधाई हो {name}! आपका बुकिंग अनुरोध सबमिट हुआ!\n\n📋 एडमिन समीक्षा करेगा और स्वीकृत होने पर व्हाट्सएप पुष्टि भेजेगा।\n\nJinniChirag चुनने के लिए धन्यवाद! 💄✨",
-        "mr": f"🎉 अभिनंदन {name}! तुमची बुकिंग विनंती सबमिट झाली!\n\n📋 अॅडमिन पुनरावलोकन करेल आणि मंजूर झाल्यावर व्हाट्सअॅप पुष्टी पाठवेल।\n\nJinniChirag निवडल्याबद्दल धन्यवाद! 💄✨"
-    }
-    return messages.get(language, messages["en"])
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete specific session"""
+    deleted = memory_store.delete_memory(session_id)
+    if deleted:
+        return {"status": "ok", "message": "Session deleted"}
+    raise HTTPException(404, "Session not found")
