@@ -14,6 +14,7 @@ import jwt
 import bcrypt
 import re
 
+
 from pymongo import MongoClient
 from bson import ObjectId
 from twilio.rest import Client
@@ -97,19 +98,11 @@ booking_collection = db["bookings"]
 admin_collection = db["admins"]
 reset_token_collection = db["reset_tokens"]
 
-# ✅ NEW: Knowledge Base Collection
-knowledge_collection = db["knowledge_base"]
-
 # Create indexes for better performance
 reset_token_collection.create_index("expires_at", expireAfterSeconds=0)
 admin_collection.create_index("email", unique=True)
 booking_collection.create_index("created_at")
 booking_collection.create_index("status")
-
-# Create indexes for knowledge base
-knowledge_collection.create_index("language")
-knowledge_collection.create_index("is_active")
-knowledge_collection.create_index("created_at")
 
 # ----------------------
 # Twilio
@@ -209,22 +202,6 @@ class BookingSearchQuery(BaseModel):
     date_to: Optional[str] = None
     limit: int = 50
     skip: int = 0
-
-# ==========================================================
-# MODELS - KNOWLEDGE BASE
-# ==========================================================
-
-class KnowledgeCreate(BaseModel):
-    title: str
-    content: str
-    language: str  # en | ne | hi | mr
-    is_active: bool = True
-
-class KnowledgeUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    language: Optional[str] = None
-    is_active: Optional[bool] = None
 
 # ==========================================================
 # UTILITY FUNCTIONS
@@ -378,54 +355,32 @@ def serialize_booking(booking: dict) -> dict:
         booking["updated_at"] = booking["updated_at"].isoformat()
     return booking
 
-def serialize_knowledge(knowledge: dict) -> dict:
-    """Convert knowledge document to JSON-safe format"""
-    knowledge["_id"] = str(knowledge["_id"])
-    if "created_at" in knowledge and isinstance(knowledge["created_at"], datetime):
-        knowledge["created_at"] = knowledge["created_at"].isoformat()
-    if "updated_at" in knowledge and isinstance(knowledge["updated_at"], datetime):
-        knowledge["updated_at"] = knowledge["updated_at"].isoformat()
-    return knowledge
-
 # ==========================================================
-# KNOWLEDGE BASE FUNCTIONS
+# LOAD WEBSITE CONTENT
 # ==========================================================
 
-def load_knowledge_from_db(language: str) -> str:
-    """Load knowledge base content from database for specific language"""
-    try:
-        # Get all active knowledge entries for the specified language
-        knowledge_entries = knowledge_collection.find({
-            "language": language,
-            "is_active": True
-        }).sort("created_at", -1)
-        
-        # Combine all content
-        content_blocks = []
-        for entry in knowledge_entries:
-            content_blocks.append(entry.get("content", ""))
-        
-        return "\n\n".join(content_blocks)
-    except Exception as e:
-        logger.error(f"Error loading knowledge from database: {e}")
+def load_website_content(folder="content") -> str:
+    blocks = []
+    if not os.path.exists(folder):
         return ""
+
+    for file in os.listdir(folder):
+        if file.endswith(".txt"):
+            try:
+                with open(os.path.join(folder, file), "r", encoding="utf-8") as f:
+                    blocks.append(f.read())
+            except Exception as e:
+                logger.warning(f"Failed to read {file}: {e}")
+
+    return "\n\n".join(blocks)
+
+WEBSITE_CONTENT = load_website_content()
 
 # ==========================================================
 # SYSTEM PROMPTS
 # ==========================================================
 
-LANGUAGE_MAP = {
-    "en": "English",
-    "ne": "Nepali",
-    "hi": "Hindi",
-    "mr": "Marathi",
-}
-
-def get_base_system_prompt(language: str) -> str:
-    """Generate system prompt with knowledge base content for specific language"""
-    website_content = load_knowledge_from_db(language)
-    
-    return f"""
+BASE_SYSTEM_PROMPT = f"""
 You are the official AI assistant for the website "JinniChirag Makeup Artist".
 
 Rules:
@@ -436,8 +391,15 @@ Rules:
 - NEVER invent prices, experience, or contact details.
 
 Website Content:
-{website_content}
+{WEBSITE_CONTENT}
 """
+
+LANGUAGE_MAP = {
+    "en": "English",
+    "ne": "Nepali",
+    "hi": "Hindi",
+    "mr": "Marathi",
+}
 
 # ############################################################
 # PUBLIC ROUTES
@@ -474,11 +436,8 @@ STRICTLY FORBIDDEN:
 - Do NOT apologize for language support.
 """
 
-    # Get the base system prompt with knowledge base content
-    base_prompt = get_base_system_prompt(req.language)
-    
     messages_for_ai = [
-        {"role": "system", "content": base_prompt},
+        {"role": "system", "content": BASE_SYSTEM_PROMPT},
         {"role": "system", "content": language_reset_prompt},
     ]
 
@@ -511,7 +470,7 @@ STRICTLY FORBIDDEN:
 
 
 
-# BOOKING APIs
+#BOOKING APIs
 TEMP_BOOKING_OTPS = {}
 
 @app.post("/bookings/request")
@@ -885,141 +844,6 @@ async def delete_booking(
         raise HTTPException(status_code=404, detail="Booking not found")
     
     return {"message": "Booking deleted successfully"}
-
-# ############################################################
-# ADMIN ROUTES - KNOWLEDGE BASE MANAGEMENT
-# ############################################################
-
-@app.post("/admin/knowledge")
-async def create_knowledge(
-    data: KnowledgeCreate,
-    admin: dict = Depends(get_current_admin)
-):
-    """Create new knowledge base entry"""
-    
-    # Validate language
-    if data.language not in LANGUAGE_MAP:
-        raise HTTPException(status_code=400, detail="Unsupported language")
-    
-    knowledge_doc = {
-        "title": data.title,
-        "content": data.content,
-        "language": data.language,
-        "is_active": data.is_active,
-        "created_at": datetime.utcnow(),
-        "updated_at": None
-    }
-    
-    result = knowledge_collection.insert_one(knowledge_doc)
-    
-    return {
-        "message": "Knowledge base entry created successfully",
-        "id": str(result.inserted_id)
-    }
-
-@app.get("/admin/knowledge")
-async def get_all_knowledge(
-    language: Optional[str] = None,
-    is_active: Optional[bool] = None,
-    admin: dict = Depends(get_current_admin)
-):
-    """Get all knowledge base entries with optional filtering"""
-    
-    query = {}
-    
-    if language:
-        if language not in LANGUAGE_MAP:
-            raise HTTPException(status_code=400, detail="Unsupported language")
-        query["language"] = language
-    
-    if is_active is not None:
-        query["is_active"] = is_active
-    
-    knowledge_entries = list(
-        knowledge_collection
-        .find(query)
-        .sort("created_at", -1)
-    )
-    
-    return [serialize_knowledge(entry) for entry in knowledge_entries]
-
-@app.get("/admin/knowledge/{knowledge_id}")
-async def get_knowledge_entry(
-    knowledge_id: str,
-    admin: dict = Depends(get_current_admin)
-):
-    """Get single knowledge base entry"""
-    
-    try:
-        knowledge = knowledge_collection.find_one({"_id": ObjectId(knowledge_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid knowledge ID")
-    
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    
-    return serialize_knowledge(knowledge)
-
-@app.patch("/admin/knowledge/{knowledge_id}")
-async def update_knowledge_entry(
-    knowledge_id: str,
-    data: KnowledgeUpdate,
-    admin: dict = Depends(get_current_admin)
-):
-    """Update knowledge base entry"""
-    
-    try:
-        knowledge = knowledge_collection.find_one({"_id": ObjectId(knowledge_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid knowledge ID")
-    
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    
-    # Validate language if provided
-    if data.language and data.language not in LANGUAGE_MAP:
-        raise HTTPException(status_code=400, detail="Unsupported language")
-    
-    # Prepare update data
-    update_data = {}
-    if data.title is not None:
-        update_data["title"] = data.title
-    if data.content is not None:
-        update_data["content"] = data.content
-    if data.language is not None:
-        update_data["language"] = data.language
-    if data.is_active is not None:
-        update_data["is_active"] = data.is_active
-    
-    update_data["updated_at"] = datetime.utcnow()
-    
-    # Update in database
-    result = knowledge_collection.update_one(
-        {"_id": ObjectId(knowledge_id)},
-        {"$set": update_data}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    
-    return {"message": "Knowledge base entry updated successfully"}
-
-@app.delete("/admin/knowledge/{knowledge_id}")
-async def delete_knowledge_entry(
-    knowledge_id: str,
-    admin: dict = Depends(get_current_admin)
-):
-    """Delete knowledge base entry"""
-    
-    try:
-        result = knowledge_collection.delete_one({"_id": ObjectId(knowledge_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid knowledge ID")
-    
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    
-    return {"message": "Knowledge base entry deleted successfully"}
 
 # ############################################################
 # ADMIN ROUTES - ANALYTICS & STATISTICS
