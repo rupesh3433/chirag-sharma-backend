@@ -40,6 +40,7 @@ def get_agent_system_prompt(language: str, memory_state: dict) -> str:
     
     intent = memory_state["intent"]
     missing = memory_state["missing_fields"]
+    last_shown_list = memory_state.get("last_shown_list", None)
     
     # Build collected info display
     collected = []
@@ -71,11 +72,14 @@ def get_agent_system_prompt(language: str, memory_state: dict) -> str:
     
     services_text = "\n".join(services_info)
     
+    context_info = f"LAST SHOWN LIST: {last_shown_list if last_shown_list else 'None'}"
+    
     return f"""You are JinniChirag's AI Booking Assistant. You help customers book makeup services.
 
 LANGUAGE: {lang_name}
 STAGE: {memory_state['stage']}
 MISSING: {', '.join(missing) if missing else 'All collected!'}
+{context_info}
 
 COLLECTED INFORMATION:
 {collected_text}
@@ -83,15 +87,19 @@ COLLECTED INFORMATION:
 AVAILABLE SERVICES & PRICING:
 {services_text}
 
-CONVERSATION RULES:
+CONVERSATION RULES (CRITICAL):
 1. Always respond in {lang_name}
 2. Be warm, professional, and helpful
-3. **SMART COLLECTION**: Accept multiple fields at once when user provides them
-4. When asking for info, suggest bulk input format
-5. Acknowledge all collected information naturally
-6. For service questions, provide accurate pricing from above
-7. When all info collected, confirm before sending OTP
-8. Available countries: India, Nepal, Pakistan, Bangladesh, Dubai
+3. **CONTEXT-AWARE NUMERIC SELECTION**: Interpret numbers based on last shown list
+4. **NEVER ask "Which service?" after package is chosen**
+5. **SMART COLLECTION**: Accept multiple fields at once when user provides them
+6. **PHONE MUST HAVE COUNTRY CODE**: Always ask for +91, +977, etc.
+7. **NEVER assume country**: Infer from address/pincode, ask if unclear
+8. When asking for info, suggest bulk input format
+9. Acknowledge all collected information naturally
+10. For service questions, provide accurate pricing from above
+11. When all info collected, confirm before sending OTP
+12. Available countries: India, Nepal, Pakistan, Bangladesh, Dubai
 
 RESPONSE STYLE:
 - Keep responses concise (2-3 sentences)
@@ -113,7 +121,12 @@ def get_welcome_message(language: str, is_booking: bool = False) -> str:
 • Engagement & Pre-Wedding (₹19,999 - ₹59,999)
 • Henna/Mehendi (₹19,999 - ₹49,999)
 
-Which service interests you?
+Please choose a service by number or name:
+
+1. Bridal Makeup Services
+2. Party Makeup Services
+3. Engagement & Pre-Wedding Makeup
+4. Henna (Mehendi) Services
 
 💡 **Tip**: You can provide multiple details at once to save time!
 Example: "Party makeup, name is John, email john@email.com, phone +91-9876543210"
@@ -126,7 +139,12 @@ Example: "Party makeup, name is John, email john@email.com, phone +91-9876543210
 • इन्गेजमेन्ट र प्री-वेडिंग (₹१९,९९९ - ₹५९,९९९)
 • हेन्ना/मेहेन्दी (₹१९,९९९ - ₹४९,९९९)
 
-कुन सेवा चाहिन्छ?
+कृपया नम्बर वा नामले सेवा छनोट गर्नुहोस्:
+
+१. ब्राइडल मेकअप सेवाहरू
+२. पार्टी मेकअप सेवाहरू
+३. इन्गेजमेन्ट र प्री-वेडिंग मेकअप
+४. हेन्ना (मेहेन्दी) सेवाहरू
 
 💡 **सुझाव**: समय बचाउन धेरै विवरणहरू एकैपटक दिन सक्नुहुन्छ!""",
             "hi": """👋 स्वागत है! मैं आपको मेकअप सेवा बुक करने में मदद करूंगा।
@@ -137,7 +155,12 @@ Example: "Party makeup, name is John, email john@email.com, phone +91-9876543210
 • एंगेजमेंट और प्री-वेडिंग (₹१९,९९९ - ₹५९,९९९)
 • मेंहदी (₹१९,९९९ - ₹४९,९९९)
 
-कौन सी सेवा चाहिए?
+कृपया नंबर या नाम से सेवा चुनें:
+
+1. ब्राइडल मेकअप सेवाएं
+2. पार्टी मेकअप सेवाएं
+3. एंगेजमेंट और प्री-वेडिंग मेकअप
+4. मेंहदी सेवाएं
 
 💡 **सुझाव**: समय बचाने के लिए एक साथ कई विवरण दे सकते हैं!""",
             "mr": """👋 स्वागत आहे! मी तुम्हाला मेकअप सेवा बुक करण्यात मदत करेन।
@@ -148,7 +171,12 @@ Example: "Party makeup, name is John, email john@email.com, phone +91-9876543210
 • इंगेजमेंट आणि प्री-वेडिंग (₹१९,९९९ - ₹५९,९९९)
 • मेंदी (₹१९,९९९ - ₹४९,९९९)
 
-कोणती सेवा हवी?
+कृपया क्रमांक किंवा नावाने सेवा निवडा:
+
+1. ब्राइडल मेकअप सेवा
+2. पार्टी मेकअप सेवा
+3. इंगेजमेंट आणि प्री-वेडिंग मेकअप
+4. मेंदी सेवा
 
 💡 **सूचना**: वेळ वाचवण्यासाठी एकाच वेळी अनेक तपशील देऊ शकता!"""
         }
@@ -170,7 +198,7 @@ def get_bulk_request_message(missing_fields: list, language: str) -> str:
 {chr(10).join(f"• {field}" for field in missing_fields)}
 
 💡 **Quick Tip**: You can provide all at once to save time!
-Example: "Name: John Doe, Email: john@email.com, Phone: +91-9876543210, Country: India"
+Example: "Name: John Doe, Phone: +91-9876543210, Email: john@email.com, Date: 5 Feb 2026, Address: 123 Main St Mumbai, PIN: 400001"
 
 Or provide them one by one. What would you like to share?""",
         
@@ -203,7 +231,6 @@ def get_otp_sent_message(language: str, phone: str) -> str:
     }
     return messages.get(language, messages["en"])
 
-    
 def get_booking_confirmed_message(language: str, name: str) -> str:
     """Booking confirmation message shown in chat"""
     messages = {
@@ -266,13 +293,9 @@ JinniChirag निवडल्याबद्दल धन्यवाद! क�
     }
     return messages.get(language, messages["en"])
 
-
-
-
-def detect_booking_intent(message: str, language: str) -> bool:
+def detect_booking_intent(message: str, language: str, last_shown_list: str = None) -> bool:
     """
-    FIXED: Detect if message contains booking intent
-    Now handles: "go for 1", "1", "choose 1", etc.
+    Detect if message contains booking intent with context awareness
     """
     msg_lower = message.lower().strip()
     
@@ -281,36 +304,55 @@ def detect_booking_intent(message: str, language: str) -> bool:
         "book", "booking", "i want to book", "want to book", "book this",
         "book it", "proceed with booking", "confirm booking", "make booking",
         "schedule", "reserve", "appointment", "i'll book", "let's book",
-        "go for", "go with", "choose", "select", "pick", "get"  # ADDED
+        "proceed", "confirm", "go ahead"
     ]
     
     if any(signal in msg_lower for signal in strong_signals):
         return True
     
-    # NUMERIC selection (1, 2, 3, 4) - ADDED
-    if re.match(r'^[1-4]$', msg_lower.strip()):
+    # CONTEXT-AWARE NUMERIC SELECTION
+    if last_shown_list:
+        num_match = re.search(r'\b([1-4])\b', msg_lower)
+        if num_match:
+            return True
+        
+        if any(phrase in msg_lower for phrase in ["go with", "choose", "select", "pick", "option", "take"]):
+            num_match = re.search(r'\b([1-4])\b', msg_lower)
+            if num_match:
+                return True
+    
+    # "I want/need [service]" without "to know/information/details"
+    if ("i want" in msg_lower or "i need" in msg_lower or "interested in" in msg_lower) and \
+       not any(x in msg_lower for x in ["know", "information", "details", "about", "learn"]):
+        return True
+    
+    # Check for multiple personal details
+    detail_patterns = [
+        r'name[:\s]', r'phone[:\s]', r'email[:\s]', r'\+\d{1,3}', 
+        r'@\w+\.\w+', r'\d{5,6}', r'address[:\s]', r'pincode[:\s]',
+        r'pin[:\s]', r'postal[:\s]', r'zip[:\s]'
+    ]
+    
+    detail_count = sum(1 for pattern in detail_patterns if re.search(pattern, msg_lower, re.IGNORECASE))
+    
+    if detail_count >= 2:
         return True
     
     # Do NOT trigger on informational queries
     info_queries = [
         "list", "show", "tell me about", "what are", "what is",
-        "which", "how much", "cost", "price", "info", "information"
+        "which", "how much", "cost", "price", "info", "information",
+        "details", "about", "explain", "describe", "tell me more",
+        "can you tell me", "what do you offer", "available"
     ]
     
-    # If it's just asking for information, NOT booking
-    if any(query in msg_lower for query in info_queries):
+    info_words = any(query in msg_lower for query in info_queries)
+    question_mark = "?" in msg_lower
+    
+    if (info_words or question_mark) and detail_count == 0:
         return False
     
-    # "I want/need [service]" without "to know/information/details"
-    if ("i want" in msg_lower or "i need" in msg_lower) and \
-       not any(x in msg_lower for x in ["know", "information", "details", "about"]):
-        return True
-    
-    # Check for multiple details in one message (indicates booking intent)
-    detail_patterns = [r'name[:\s]', r'phone[:\s]', r'email[:\s]', r'\d{10}', r'@']
-    detail_count = sum(1 for pattern in detail_patterns if re.search(pattern, msg_lower))
-    
-    return detail_count >= 2
+    return False
 
 def get_package_options(service: str, language: str) -> str:
     """Get formatted package options for a service"""
@@ -320,16 +362,19 @@ def get_package_options(service: str, language: str) -> str:
     packages = SERVICES[service]["packages"]
     
     options = {
-        "en": f"Please choose a package for {service}:\n",
-        "ne": f"{service} को लागि प्याकेज छनोट गर्नुहोस्:\n",
-        "hi": f"{service} के लिए पैकेज चुनें:\n",
-        "mr": f"{service} साठी पॅकेज निवडा:\n"
+        "en": f"📦 **Packages for {service}:**\n\n",
+        "ne": f"📦 **{service} को लागि प्याकेजहरू:**\n\n",
+        "hi": f"📦 **{service} के लिए पैकेज:**\n\n",
+        "mr": f"📦 **{service} साठी पॅकेज:**\n\n"
     }
     
     result = options.get(language, options["en"])
     
     for idx, (pkg, price) in enumerate(packages.items(), 1):
-        result += f"{idx}. {pkg} - {price}\n"
+        short_name = pkg.split("(")[0].strip() if "(" in pkg else pkg
+        result += f"{idx}. {short_name} - {price}\n"
+    
+    result += f"\nPlease choose a number or name:"
     
     return result.strip()
 
@@ -349,3 +394,87 @@ def acknowledge_collected_fields(collected_summary: dict, language: str) -> str:
     template = templates.get(language, templates["en"])
     
     return template.format(items=items)
+
+def get_phone_prompt(language: str) -> str:
+    """Get phone prompt with country code requirement"""
+    prompts = {
+        "en": """📱 **WhatsApp Number with Country Code**
+
+Please share your WhatsApp number WITH country code:
+• +91-9876543210 (India)
+• +977-9851234567 (Nepal)
+• +92-3001234567 (Pakistan)
+• +880-1712345678 (Bangladesh)
+• +971-501234567 (Dubai)
+
+We'll send OTP to this number for verification.""",
+        
+        "ne": """📱 **देश कोड सहित व्हाट्सएप नम्बर**
+
+कृपया देश कोड सहित आफ्नो व्हाट्सएप नम्बर साझा गर्नुहोस्:
+• +९१-९८७६५४३२१० (भारत)
+• +९७७-९८५१२३४५६७ (नेपाल)
+• +९२-३००१२३४५६७ (पाकिस्तान)
+• +८८०-१७१२३४५६७८ (बंगलादेश)
+• +९७१-५०१२३४५६७ (दुबई)
+
+हामी प्रमाणीकरणको लागि यो नम्बरमा OTP पठाउनेछौं।""",
+        
+        "hi": """📱 **देश कोड के साथ व्हाट्सएप नंबर**
+
+कृपया देश कोड के साथ अपना व्हाट्सएप नंबर साझा करें:
+• +९१-९८७६५४३२१० (भारत)
+• +९७७-९८५१२३४५६७ (नेपाल)
+• +९२-३००१२३४५६७ (पाकिस्तान)
+• +८८०-१७१२३४५६७८ (बांग्लादेश)
+• +९७१-५०१२३४५६७ (दुबई)
+
+हम सत्यापन के लिए इस नंबर पर OTP भेजेंगे।"""
+    }
+    
+    return prompts.get(language, prompts["en"])
+
+def get_country_inquiry_prompt(language: str) -> str:
+    """Prompt for country when inference is unclear"""
+    prompts = {
+        "en": """🌍 **Service Location Country**
+
+I couldn't determine the country from the address/pincode.
+
+Is the service location in:
+• India
+• Nepal
+• Pakistan
+• Bangladesh
+• Dubai/UAE
+
+Please specify the country:""",
+        
+        "ne": """🌍 **सेवा स्थान देश**
+
+मैले ठेगाना/पिनबाट देश निर्धारण गर्न सकिन।
+
+के सेवा स्थान यसमा छ:
+• भारत
+• नेपाल
+• पाकिस्तान
+• बंगलादेश
+• दुबई/युएई
+
+कृपया देश निर्दिष्ट गर्नुहोस्:""",
+        
+        "hi": """🌍 **सेवा स्थान देश**
+
+मैं पते/पिन कोड से देश निर्धारित नहीं कर सका।
+
+क्या सेवा स्थान इसमें है:
+• भारत
+• नेपाल
+• पाकिस्तान
+• बांग्लादेश
+• दुबई/यूएई
+
+कृपया देश निर्दिष्ट करें:"""
+    }
+    
+    return prompts.get(language, prompts["en"])

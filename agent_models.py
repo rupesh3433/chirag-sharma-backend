@@ -10,8 +10,8 @@ class BookingIntent(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
-    phone_country: Optional[str] = None  # NEW: Where phone is registered
-    service_country: Optional[str] = None  # Where service is needed
+    phone_country: Optional[str] = None
+    service_country: Optional[str] = None
     address: Optional[str] = None
     pincode: Optional[str] = None
     date: Optional[str] = None
@@ -26,9 +26,10 @@ class BookingIntent(BaseModel):
     @validator('phone')
     def validate_phone(cls, v):
         if v:
-            # Extract only digits
+            # Must have country code
+            if not v.startswith('+'):
+                raise ValueError('Phone must start with country code (e.g., +91)')
             digits = re.sub(r'\D', '', v)
-            # Should be 10-15 digits
             if len(digits) < 10 or len(digits) > 15:
                 raise ValueError('Phone must be 10-15 digits')
         return v
@@ -36,7 +37,6 @@ class BookingIntent(BaseModel):
     @validator('date')
     def validate_date(cls, v):
         if v:
-            # Check format YYYY-MM-DD
             if not re.match(r'^\d{4}-\d{2}-\d{2}$', v):
                 raise ValueError('Date must be YYYY-MM-DD format')
         return v
@@ -50,6 +50,11 @@ class BookingIntent(BaseModel):
             value = getattr(self, field)
             if not value or value == "":
                 return False
+        
+        # Special check: phone must have country code
+        if self.phone and not self.phone.startswith('+'):
+            return False
+            
         return True
     
     def missing_fields(self) -> List[str]:
@@ -59,14 +64,13 @@ class BookingIntent(BaseModel):
             "package": "package choice",
             "name": "your name",
             "email": "email address",
-            "phone": "phone number",
+            "phone": "phone number with country code",
             "service_country": "service country",
             "address": "service address",
             "pincode": "PIN/postal code",
             "date": "preferred date"
         }
         
-        # Priority order for collecting fields
         priority_fields = ['service', 'package', 'name', 'email', 'phone', 
                           'service_country', 'address', 'pincode', 'date']
         
@@ -75,6 +79,8 @@ class BookingIntent(BaseModel):
             value = getattr(self, field)
             if not value or value == "":
                 missing.append(field_labels.get(field, field))
+            elif field == 'phone' and not value.startswith('+'):
+                missing.append("phone number with country code")
         
         return missing
     
@@ -98,7 +104,14 @@ class BookingIntent(BaseModel):
         for field, label in fields.items():
             value = getattr(self, field)
             if value:
-                summary[label] = value
+                if field == 'phone' and value:
+                    # Mask phone for display
+                    if len(value) > 8:
+                        summary[label] = f"{value[:8]}****{value[-4:]}"
+                    else:
+                        summary[label] = value
+                else:
+                    summary[label] = value
         
         return summary
     
@@ -111,12 +124,13 @@ class ConversationMemory(BaseModel):
     session_id: str
     language: str
     intent: BookingIntent = Field(default_factory=BookingIntent)
-    stage: str = "greeting"  # greeting, collecting_info, confirming, otp_sent, completed
+    stage: str = "greeting"
     booking_id: Optional[str] = None
     otp_attempts: int = 0
     last_updated: datetime = Field(default_factory=datetime.utcnow)
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
-    last_asked_field: Optional[str] = None  # Track what we last asked for
+    last_shown_list: Optional[str] = None  # "services", "packages", "countries"
+    last_asked_field: Optional[str] = None
     
     class Config:
         arbitrary_types_allowed = True
@@ -128,7 +142,6 @@ class ConversationMemory(BaseModel):
             "content": content,
             "timestamp": datetime.utcnow().isoformat()
         })
-        # Keep last 15 messages (enough for context)
         if len(self.conversation_history) > 15:
             self.conversation_history = self.conversation_history[-15:]
     
@@ -138,6 +151,7 @@ class ConversationMemory(BaseModel):
         self.stage = "greeting"
         self.booking_id = None
         self.otp_attempts = 0
+        self.last_shown_list = None
         self.last_asked_field = None
         self.conversation_history.clear()
     
