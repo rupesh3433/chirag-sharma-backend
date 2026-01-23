@@ -266,42 +266,142 @@ class BookingFSM:
         })
     
     def _handle_details_collection(self, message: str, intent: BookingIntent, language: str, history: List) -> Tuple[str, BookingIntent, Dict]:
-        """SINGLE STATE for collecting ALL personal details - UPDATED with date recovery"""
+        """SINGLE STATE for collecting ALL personal details - IMPROVED for frustrated users"""
         
-        # Check for "I already provided date" - FIXED
-        if "preferred date" in intent.missing_fields() or (not intent.date and "date" not in intent.missing_fields()):
-            already_provided, found_date = self._handle_already_provided_date(message, intent, history)
-            if already_provided and found_date:
+        # FIRST: Check if user is frustrated about date/any field
+        msg_lower = message.lower()
+        
+        # Quick frustration check
+        frustration_words = ['again', 'seriously', 'ugh', 'come on', 'really', 'annoying', 
+                            'frustrating', 'ridiculous', 'whats wrong', "what's wrong", 
+                            'hello?', 'hey', 'are you there', 'anyone', 'this is crazy',
+                            'unbelievable', 'omg', 'oh my god', 'god', 'jeez', 'jesus',
+                            'what the hell', 'what the fuck', 'wtf', 'damn', 'dammit']
+        
+        is_frustrated = any(word in msg_lower for word in frustration_words)
+        
+        if is_frustrated:
+            logger.warning(f"😠 User seems frustrated: '{message}'")
+            
+            # Try to recover ALL missing fields from history
+            all_recovered = {}
+            
+            # Check for date specifically first (most common frustration)
+            date_recovered, found_date = self._handle_already_provided_date(message, intent, history)
+            if date_recovered and found_date:
                 intent.date = found_date
-                extracted = {"Date": found_date}
+                all_recovered["Date"] = found_date
+                logger.info(f"🔄 Recovered date from frustration: {found_date}")
+            
+            # Check history for other missing fields too
+            missing_fields = intent.missing_fields()
+            if missing_fields and len(missing_fields) > 0:
+                for field in missing_fields[:3]:  # Check first 3 missing fields
+                    # Map field names
+                    field_map = {
+                        "your name": "name",
+                        "email address": "email", 
+                        "phone number with country code": "phone",
+                        "service address": "address",
+                        "PIN/postal code": "pincode",
+                        "preferred date": "date"
+                    }
+                    
+                    actual_field = field_map.get(field)
+                    if actual_field:
+                        value = self._check_history_for_field(actual_field, history)
+                        if value:
+                            if actual_field == "name" and not intent.name:
+                                intent.name = value
+                                all_recovered["Name"] = value
+                            elif actual_field == "email" and not intent.email:
+                                intent.email = value
+                                all_recovered["Email"] = value
+                            elif actual_field == "phone" and not self._is_phone_valid(intent.phone):
+                                intent.phone = value
+                                all_recovered["Phone"] = value
+                            elif actual_field == "address" and not intent.address:
+                                intent.address = value
+                                all_recovered["Address"] = value[:50] + "..." if len(value) > 50 else value
+                            elif actual_field == "pincode" and not intent.pincode:
+                                intent.pincode = value
+                                all_recovered["PIN Code"] = value
+                            elif actual_field == "date" and not intent.date and not date_recovered:
+                                intent.date = value
+                                all_recovered["Date"] = value
+            
+            # If we recovered anything, acknowledge it
+            if all_recovered:
+                # Build acknowledgment message
+                ack_parts = ["✅ I understand you're frustrated! Let me check what I found..."]
+                for field, value in all_recovered.items():
+                    ack_parts.append(f"• {field}: {value}")
                 
                 # Check if all fields are now complete
                 if intent.is_complete():
                     return (BookingState.CONFIRMING.value, intent, {
                         "action": "confirm",
-                        "message": self._get_confirmation_prompt(intent, language),
-                        "collected": extracted,
+                        "message": f"{' '.join(ack_parts)}\n\n🎯 Perfect! I have everything now.\n\n{self._get_confirmation_prompt(intent, language)}",
+                        "collected": all_recovered,
                         "mode": "booking"
                     })
                 else:
-                    # Still missing other fields
                     missing = intent.missing_fields()
                     missing = self._reorder_missing_fields(missing)
-                    prompt = self._get_missing_fields_prompt(intent, language, extracted, missing)
+                    
+                    # Create a more empathetic prompt
+                    if len(missing) == 1:
+                        prompt = f"I just need one more thing:\n• {missing[0]}"
+                    elif len(missing) <= 3:
+                        prompt = f"I still need:\n{chr(10).join(f'• {field}' for field in missing)}"
+                    else:
+                        prompt = f"I need a few more details to complete your booking."
                     
                     return (BookingState.COLLECTING_DETAILS.value, intent, {
                         "action": "ask_details",
-                        "message": prompt,
-                        "collected": extracted,
+                        "message": f"{' '.join(ack_parts)}\n\n{prompt}\n\n💡 **Tip:** You can provide everything at once to save time!",
+                        "collected": all_recovered,
                         "missing": missing,
                         "mode": "booking"
                     })
         
-        # First check if user says "I already gave this"
+        # Check if user says "I already provided date" or similar
+        already_provided, found_date = self._handle_already_provided_date(message, intent, history)
+        if already_provided and found_date:
+            logger.info(f"🔄 Setting date from recovery: {found_date}")
+            intent.date = found_date
+            
+            # Check if all fields are now complete
+            if intent.is_complete():
+                return (BookingState.CONFIRMING.value, intent, {
+                    "action": "confirm",
+                    "message": self._get_confirmation_prompt(intent, language),
+                    "collected": {"Date (recovered)": found_date},
+                    "mode": "booking"
+                })
+            else:
+                # Still missing other fields
+                missing = intent.missing_fields()
+                missing = self._reorder_missing_fields(missing)
+                prompt = self._get_missing_fields_prompt(intent, language, {"Date": found_date}, missing)
+                
+                return (BookingState.COLLECTING_DETAILS.value, intent, {
+                    "action": "ask_details",
+                    "message": f"✅ Found your date: {found_date}\n\n{prompt}",
+                    "collected": {"Date": found_date},
+                    "missing": missing,
+                    "mode": "booking"
+                })
+        
+        # Check if user says "I already gave this" for any field
         if self._is_already_given_response(message):
+            logger.info("🔍 User says they already provided information")
+            
             # Check history for all missing fields
             recovered_fields = self._recover_fields_from_history(intent, history)
             if recovered_fields:
+                logger.info(f"🔄 Recovered fields from history: {list(recovered_fields.keys())}")
+                
                 # Update intent with recovered fields
                 for field, value in recovered_fields.items():
                     if field == "name" and not intent.name:
@@ -319,12 +419,32 @@ class BookingFSM:
                     elif field == "pincode" and not intent.pincode:
                         intent.pincode = value
                 
+                # Create acknowledgment
+                ack_fields = {}
+                for field, value in recovered_fields.items():
+                    if isinstance(value, dict) and "phone" in value:
+                        ack_fields["Phone"] = value["phone"]
+                    elif field == "name":
+                        ack_fields["Name"] = value
+                    elif field == "email":
+                        ack_fields["Email"] = value
+                    elif field == "date":
+                        ack_fields["Date"] = value
+                    elif field == "address":
+                        ack_fields["Address"] = value[:50] + "..." if len(value) > 50 else value
+                    elif field == "pincode":
+                        ack_fields["PIN Code"] = value
+                
                 # Re-check if all fields are complete
                 if intent.is_complete():
+                    ack_message = "✅ Found all your information in our conversation!"
+                    for field, value in ack_fields.items():
+                        ack_message += f"\n• {field}: {value}"
+                    
                     return (BookingState.CONFIRMING.value, intent, {
                         "action": "confirm",
-                        "message": self._get_confirmation_prompt(intent, language),
-                        "collected": {"Recovered": f"{len(recovered_fields)} fields from history"},
+                        "message": f"{ack_message}\n\n{self._get_confirmation_prompt(intent, language)}",
+                        "collected": ack_fields,
                         "mode": "booking"
                     })
         
@@ -362,6 +482,26 @@ class BookingFSM:
             missing.remove("preferred date")
             if "Date" not in extracted_fields:
                 extracted_fields["Date"] = intent.date
+        
+        # Special case: If user provides multiple details but some are still missing
+        if extracted_fields and len(extracted_fields) >= 2 and missing:
+            # User provided multiple things but not everything
+            ack_parts = ["✅ Great! I've got:"]
+            for field, value in extracted_fields.items():
+                ack_parts.append(f"• {field}: {value}")
+            
+            if len(missing) == 1:
+                prompt = f"\nI just need one more thing:\n• {missing[0]}"
+            else:
+                prompt = f"\nI still need:\n{chr(10).join(f'• {field}' for field in missing)}"
+            
+            return (BookingState.COLLECTING_DETAILS.value, intent, {
+                "action": "ask_details",
+                "message": "\n".join(ack_parts) + prompt + "\n\n💡 You can provide everything at once!",
+                "collected": extracted_fields,
+                "missing": missing,
+                "mode": "booking"
+            })
         
         # Build prompt asking for missing fields
         prompt = self._get_missing_fields_prompt(intent, language, extracted_fields, missing)
@@ -1164,21 +1304,14 @@ class BookingFSM:
         return None
     
     def _extract_date(self, message: str) -> Optional[str]:
-        """Extract date - multiple formats - IMPROVED"""
+        """Extract date - FIXED for invalid dates like 30 feb"""
         msg_lower = message.lower().strip()
         
-        # Clean message - remove names, emails, phones first
+        # Clean message
         clean_msg = message
-        
-        # Remove email
-        clean_msg = re.sub(r'\S+@\S+\.\S+', '', clean_msg)
-        
-        # Remove phone numbers with + 
-        clean_msg = re.sub(r'\+\d[\d\s\-]+', '', clean_msg)
-        
-        # Remove standalone 10+ digit numbers
-        clean_msg = re.sub(r'\b\d{10,}\b', '', clean_msg)
-        
+        clean_msg = re.sub(r'\S+@\S+\.\S+', '', clean_msg)  # Remove email
+        clean_msg = re.sub(r'\+\d[\d\s\-]+', '', clean_msg)  # Remove phone
+        clean_msg = re.sub(r'\b\d{10,}\b', '', clean_msg)  # Remove long numbers
         clean_lower = clean_msg.lower()
         
         # Relative dates
@@ -1186,8 +1319,10 @@ class BookingFSM:
             return datetime.utcnow().strftime("%Y-%m-%d")
         if 'tomorrow' in clean_lower:
             return (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+        if 'after 10 days' in clean_lower or 'in 10 days' in clean_lower:
+            return (datetime.utcnow() + timedelta(days=10)).strftime("%Y-%m-%d")
         
-        # Month names with patterns
+        # Month names
         month_map = {
             'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 
             'mar': 3, 'march': 3, 'apr': 4, 'april': 4, 
@@ -1197,34 +1332,34 @@ class BookingFSM:
             'dec': 12, 'december': 12
         }
         
-        # Pattern 1: "25th feb 2026" or "25th february 2026"
+        # Pattern 1: "30th feb 2026" or "30 feb 2026" 
         for month_name, month_num in month_map.items():
-            # Pattern with suffix (st, nd, rd, th)
-            pattern1 = rf'(\d{{1,2}})(?:st|nd|rd|th)?\s+{month_name}\s*(\d{{4}})?'
-            # Pattern without suffix
-            pattern2 = rf'\b{month_name}\s+(\d{{1,2}})\s*,?\s*(\d{{4}})?\b'
-            
-            for pattern in [pattern1, pattern2]:
-                match = re.search(pattern, clean_lower)
-                if match:
+            pattern = rf'(\d{{1,2}})(?:st|nd|rd|th)?\s+{month_name}\s*(\d{{4}})?'
+            match = re.search(pattern, clean_lower)
+            if match:
+                try:
+                    day = int(match.group(1))
+                    year = int(match.group(2)) if match.group(2) else datetime.utcnow().year
+                    
+                    # IMPORTANT FIX: Don't validate day-month validity here
+                    # Just store whatever user provides
                     try:
-                        if pattern == pattern1:
-                            day = int(match.group(1))
-                            year = int(match.group(2)) if match.group(2) else datetime.utcnow().year
-                        else:  # pattern2
-                            day = int(match.group(1))
-                            year = int(match.group(2)) if match.group(2) else datetime.utcnow().year
-                        
-                        # Validate day
-                        if 1 <= day <= 31:
-                            date_obj = datetime(year, month_num, day)
-                            # Ensure date is not in the past (except for historical/training data)
-                            if date_obj >= datetime.utcnow():
-                                return date_obj.strftime("%Y-%m-%d")
-                    except (ValueError, AttributeError):
-                        continue
+                        # Try to create the date
+                        date_obj = datetime(year, month_num, day)
+                        return date_obj.strftime("%Y-%m-%d")
+                    except ValueError:
+                        # If invalid (like Feb 30), still accept it but with validation
+                        # Use last valid day of month
+                        import calendar
+                        last_day = calendar.monthrange(year, month_num)[1]
+                        corrected_day = min(day, last_day)
+                        logger.warning(f"⚠️ Invalid date {day} {month_name} {year}, corrected to {corrected_day}")
+                        date_obj = datetime(year, month_num, corrected_day)
+                        return date_obj.strftime("%Y-%m-%d")
+                except (ValueError, AttributeError):
+                    continue
         
-        # Pattern 2: "feb 25 2026" or "february 25 2026"
+        # Pattern 2: "feb 30 2026"
         for month_name, month_num in month_map.items():
             pattern = rf'{month_name}\s+(\d{{1,2}})(?:\s*,\s*|\s+)(\d{{4}})'
             match = re.search(pattern, clean_lower)
@@ -1232,21 +1367,26 @@ class BookingFSM:
                 try:
                     day = int(match.group(1))
                     year = int(match.group(2))
-                    if 1 <= day <= 31:
+                    
+                    try:
                         date_obj = datetime(year, month_num, day)
-                        if date_obj >= datetime.utcnow():
-                            return date_obj.strftime("%Y-%m-%d")
+                        return date_obj.strftime("%Y-%m-%d")
+                    except ValueError:
+                        import calendar
+                        last_day = calendar.monthrange(year, month_num)[1]
+                        corrected_day = min(day, last_day)
+                        logger.warning(f"⚠️ Invalid date {month_name} {day} {year}, corrected to {corrected_day}")
+                        date_obj = datetime(year, month_num, corrected_day)
+                        return date_obj.strftime("%Y-%m-%d")
                 except (ValueError, AttributeError):
                     continue
         
-        # Pattern 3: YYYY-MM-DD format
+        # Pattern 3: YYYY-MM-DD
         match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', message)
         if match:
             try:
                 year, month, day = map(int, match.groups())
-                date_obj = datetime(year, month, day)
-                if date_obj >= datetime.utcnow():
-                    return date_obj.strftime("%Y-%m-%d")
+                return datetime(year, month, day).strftime("%Y-%m-%d")
             except ValueError:
                 pass
         
@@ -1255,19 +1395,15 @@ class BookingFSM:
         if match:
             try:
                 day, month, year = map(int, match.groups())
-                date_obj = datetime(year, month, day)
-                if date_obj >= datetime.utcnow():
-                    return date_obj.strftime("%Y-%m-%d")
+                return datetime(year, month, day).strftime("%Y-%m-%d")
             except ValueError:
                 try:
                     month, day, year = map(int, match.groups())
-                    date_obj = datetime(year, month, day)
-                    if date_obj >= datetime.utcnow():
-                        return date_obj.strftime("%Y-%m-%d")
+                    return datetime(year, month, day).strftime("%Y-%m-%d")
                 except ValueError:
                     pass
         
-        # Pattern 5: Just month and day without year (assume current or next year)
+        # Pattern 5: Just month and day without year
         for month_name, month_num in month_map.items():
             pattern = rf'\b{month_name}\s+(\d{{1,2}})\b'
             match = re.search(pattern, clean_lower)
@@ -1281,34 +1417,44 @@ class BookingFSM:
                     if month_num < current_date.month or (month_num == current_date.month and day < current_date.day):
                         year = current_date.year + 1
                     
-                    if 1 <= day <= 31:
+                    try:
                         date_obj = datetime(year, month_num, day)
+                        return date_obj.strftime("%Y-%m-%d")
+                    except ValueError:
+                        import calendar
+                        last_day = calendar.monthrange(year, month_num)[1]
+                        corrected_day = min(day, last_day)
+                        logger.warning(f"⚠️ Invalid date {month_name} {day}, corrected to {corrected_day}")
+                        date_obj = datetime(year, month_num, corrected_day)
                         return date_obj.strftime("%Y-%m-%d")
                 except (ValueError, AttributeError):
                     continue
         
-        # Pattern 6: "25 feb" or "feb 25" (without year)
+        # Pattern 6: "30 feb" (without year)
         for month_name, month_num in month_map.items():
-            pattern1 = rf'(\d{{1,2}})\s+{month_name}\b'
-            pattern2 = rf'\b{month_name}\s+(\d{{1,2}})\b'
-            
-            for pattern in [pattern1, pattern2]:
-                match = re.search(pattern, clean_lower)
-                if match:
+            pattern = rf'(\d{{1,2}})\s+{month_name}\b'
+            match = re.search(pattern, clean_lower)
+            if match:
+                try:
+                    day = int(match.group(1))
+                    current_date = datetime.utcnow()
+                    year = current_date.year
+                    
+                    if month_num < current_date.month or (month_num == current_date.month and day < current_date.day):
+                        year = current_date.year + 1
+                    
                     try:
-                        day = int(match.group(1))
-                        current_date = datetime.utcnow()
-                        year = current_date.year
-                        
-                        # If this month has passed, use next year
-                        if month_num < current_date.month or (month_num == current_date.month and day < current_date.day):
-                            year = current_date.year + 1
-                        
-                        if 1 <= day <= 31:
-                            date_obj = datetime(year, month_num, day)
-                            return date_obj.strftime("%Y-%m-%d")
-                    except (ValueError, AttributeError):
-                        continue
+                        date_obj = datetime(year, month_num, day)
+                        return date_obj.strftime("%Y-%m-%d")
+                    except ValueError:
+                        import calendar
+                        last_day = calendar.monthrange(year, month_num)[1]
+                        corrected_day = min(day, last_day)
+                        logger.warning(f"⚠️ Invalid date {day} {month_name}, corrected to {corrected_day}")
+                        date_obj = datetime(year, month_num, corrected_day)
+                        return date_obj.strftime("%Y-%m-%d")
+                except (ValueError, AttributeError):
+                    continue
         
         return None
     
@@ -1454,43 +1600,117 @@ class BookingFSM:
         return None
 
     def _handle_already_provided_date(self, message: str, intent: BookingIntent, history: List) -> Tuple[bool, Optional[str]]:
-        """Check if user says they already provided date"""
+        """Check if user says they already provided date - IMPROVED for frustrated users"""
         msg_lower = message.lower()
         
-        # Phrases indicating user already gave date
-        date_keywords = [
-            'already provided', 'already gave', 'already told', 
-            'said already', 'i said', 'i told', 'i gave', 'you have',
-            'check', 'look', 'see', 'mentioned', 'provided',
-            'i already', 'i\'ve already', 'i have already'
+        # Check for ANY sign of user frustration about date
+        # This includes both explicit mentions and general frustration
+        frustration_indicators = [
+            # Explicit mentions of already providing date
+            "already provided", "already gave", "already told", "already said",
+            "i already gave", "i already told", "i already said", "i already provided",
+            "i told you", "i said already", "i gave you", "i mentioned",
+            "you already have", "you have it", "it's there", "check history",
+            "look back", "see previous", "i provided", "i shared",
+            
+            # Frustration about not being understood
+            "why aren't you understanding", "not understanding", "don't understand",
+            "can't understand", "why don't you understand", "not getting it",
+            "you're not getting", "you don't understand", "you're not understanding",
+            
+            # General frustration phrases
+            "again?", "seriously?", "really?", "come on", "ugh", "oh my god",
+            "for god's sake", "for goodness sake", "are you kidding", "you kidding",
+            "this is ridiculous", "ridiculous", "annoying", "frustrating",
+            "what's wrong", "what is wrong", "what's the problem", "problem",
+            "error", "bug", "glitch", "not working", "broken",
+            
+            # Date-specific frustration
+            "i gave the date", "date is there", "date already", "provided date",
+            "date provided", "told you the date", "said the date", "date mentioned",
+            "check the date", "date is", "it's in there",
+            
+            # Short angry responses
+            "i did", "i have", "yes", "obviously", "of course", "clearly"
         ]
         
-        # Check if message is about date
-        date_mentioned = any(word in msg_lower for word in ['date', 'day', 'when', 'time', 'schedule'])
+        # Also check if message contains date-related words
+        date_keywords = ['date', 'day', 'when', 'time', 'schedule', 'feb', 'jan', 'mar', 
+                        'april', 'may', 'jun', 'july', 'aug', 'sep', 'oct', 'nov', 'dec']
         
-        if (any(kw in msg_lower for kw in date_keywords) and date_mentioned) or \
-        ('already' in msg_lower and date_mentioned):
+        # Check if there's ANY frustration indicator OR date keywords
+        has_frustration = any(indicator in msg_lower for indicator in frustration_indicators)
+        mentions_date = any(keyword in msg_lower for keyword in date_keywords)
+        
+        # Also check for very short messages (often signs of frustration)
+        is_short_angry = len(message.strip()) < 20 and any(word in msg_lower for word in 
+                                                        ['yes', 'no', 'did', 'have', 'gave', 'told'])
+        
+        if has_frustration or (mentions_date and is_short_angry):
             
-            # FIRST: Check if date is actually in the current message (user might be repeating)
+            logger.warning(f"😠 User seems frustrated about date: '{message}'")
+            
+            # First, check if date is actually in the current frustrated message
             date_in_current = self._extract_date(message)
             if date_in_current:
+                logger.info(f"✅ Found date in current frustrated message: {date_in_current}")
                 return True, date_in_current
             
-            # SECOND: Check recent conversation history (last 5 user messages)
+            # Check the conversation history for ANY date
             if history:
-                # Look in reverse order (most recent first)
-                for msg in reversed(history[-10:]):  # Check last 10 messages
+                logger.info(f"🔍 Searching history for date in {len(history)} messages")
+                
+                # Look in ALL user messages, not just recent ones
+                all_dates_found = []
+                for i, msg in enumerate(history):
                     if msg["role"] == "user":
-                        # Check if this message has a date
-                        date_in_msg = self._extract_date(msg["content"])
+                        content = msg["content"]
+                        date_in_msg = self._extract_date(content)
                         if date_in_msg:
-                            logger.info(f"🔍 Found date in history: {date_in_msg}")
-                            return True, date_in_msg
+                            all_dates_found.append((i, content, date_in_msg))
+                            content_preview = content[:50].replace('\n', ' ')
+                            logger.info(f"📅 Found date at position {i}: '{content_preview}' -> {date_in_msg}")
+                
+                if all_dates_found:
+                    # Sort by position (most recent first)
+                    all_dates_found.sort(reverse=True)
+                    
+                    # Try to find the most likely date
+                    for pos, content, date_found in all_dates_found:
+                        # Check if this message looks like it contains user details
+                        has_details = any(word in content.lower() for word in 
+                                        ['name', 'phone', 'email', 'address', 'pincode', 'pin'])
+                        
+                        if has_details:
+                            logger.info(f"🎯 Most likely date from detailed message: {date_found}")
+                            return True, date_found
+                    
+                    # If no detailed message found, use the most recent date
+                    most_recent_date = all_dates_found[0][2]
+                    logger.info(f"📅 Using most recent date found: {most_recent_date}")
+                    return True, most_recent_date
             
-            # THIRD: Check if intent already has a date (maybe from previous extraction)
+            # If we still can't find a date, check if intent already has one
             if intent.date:
-                logger.info(f"🔍 Found date in intent: {intent.date}")
+                logger.info(f"✅ Intent already has date: {intent.date}")
                 return True, intent.date
+            
+            # Last resort: check if we can extract date from the context
+            # Sometimes users say "I said 30th feb" in their frustration
+            date_patterns = [
+                r'i (?:said|told|gave|provided) (?:you )?(?:the )?(?:date )?(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*\d{0,4})',
+                r'date (?:is|was) (\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*\d{0,4})',
+                r'(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*\d{0,4}) (?:is|was) (?:the|my) date'
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, msg_lower)
+                if match:
+                    date_str = match.group(1)
+                    extracted_date = self._extract_date(date_str)
+                    if extracted_date:
+                        logger.info(f"🔍 Extracted date from frustration pattern: {extracted_date}")
+                        return True, extracted_date
         
         return False, None
     
