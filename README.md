@@ -1,6 +1,6 @@
 # 🎨 JinniChirag Makeup Artist - Backend API
 
-A comprehensive, modular FastAPI backend with AI-powered chatbot, intelligent booking agent, and complete admin management system.
+A comprehensive, **modular** FastAPI backend with **AI-powered FSM chatbot**, intelligent booking agent, and complete admin management system.
 
 ---
 
@@ -9,29 +9,100 @@ A comprehensive, modular FastAPI backend with AI-powered chatbot, intelligent bo
 ```
 chirag-sharma-backend/
 │
-├── app.py                       # ⚡ Main FastAPI application
-├── config.py                    # ⚙️ Configuration & environment variables
-├── database.py                  # 🗄️ MongoDB connection & collections
-├── models.py                    # 📋 Pydantic request/response models
-├── security.py                  # 🔐 JWT authentication & password hashing
-├── services.py                  # 📡 External services (Twilio, Email, AI)
-├── utils.py                     # 🛠️ Utility functions
-├── prompts.py                   # 🤖 AI system prompts
+├── app.py                          # ⚡ Main FastAPI application
+├── config.py                       # ⚙️ Configuration & environment variables
+├── database.py                     # 🗄️ MongoDB connection & collections
+├── models.py                       # 📋 Pydantic request/response models
+├── security.py                     # 🔐 JWT authentication & password hashing
+├── services.py                     # 📡 External services (Twilio, Email)
+├── utils.py                        # 🛠️ Utility functions
+├── prompts.py                      # 🤖 AI system prompts (legacy)
 │
-├── routes_public.py             # 🌐 Public endpoints (no auth)
-├── routes_agent.py              # 🤖 Agentic booking chatbot (NEW!)
-├── agent_models.py              # 🧠 Agent state models (NEW!)
-├── agent_service.py             # 🎯 Agent AI logic (NEW!)
-├── memory_store.py              # 💾 Conversation memory (NEW!)
+├── routes_public.py                # 🌐 Public endpoints (no auth)
+├── routes_admin_auth.py            # 🔑 Admin authentication
+├── routes_admin_bookings.py        # 📅 Booking management
+├── routes_admin_knowledge.py       # 📚 Knowledge base CRUD (NEW!)
+├── routes_admin_analytics.py       # 📊 Analytics & statistics
 │
-├── routes_admin_auth.py         # 🔑 Admin authentication
-├── routes_admin_bookings.py     # 📅 Booking management
-├── routes_admin_knowledge.py    # 📚 Knowledge base CRUD
-├── routes_admin_analytics.py    # 📊 Analytics & statistics
+├── agent/                          # 🤖 MODULAR AGENTIC CHATBOT
+│   ├── __init__.py
+│   ├── orchestrator.py            # 🎯 Main orchestrator (FSM coordinator)
+│   │
+│   ├── models/                    # 📋 Data Models
+│   │   ├── __init__.py
+│   │   ├── intent.py             # BookingIntent model
+│   │   ├── memory.py             # ConversationMemory model
+│   │   ├── state.py              # BookingState enum
+│   │   └── api_models.py         # API request/response models
+│   │
+│   ├── engine/                    # 🧠 Core FSM Engine
+│   │   ├── __init__.py
+│   │   ├── fsm.py                # ✅ Finite State Machine (FIXED)
+│   │   ├── state_manager.py     # State management utilities
+│   │   └── intent_detector.py    # Intent detection logic
+│   │
+│   ├── handlers/                  # 🎭 State-Specific Handlers
+│   │   ├── __init__.py
+│   │   ├── base_handler.py       # Base handler class
+│   │   ├── greeting_handler.py   # Greeting state
+│   │   ├── service_handler.py    # Service selection
+│   │   ├── package_handler.py    # Package selection
+│   │   ├── details_handler.py    # Details collection
+│   │   ├── confirmation_handler.py # Confirmation
+│   │   ├── otp_handler.py        # OTP verification
+│   │   └── info_handler.py       # Info queries
+│   │
+│   ├── extractors/                # 🔍 Data Extractors
+│   │   ├── __init__.py
+│   │   ├── base_extractor.py     # Base extractor class
+│   │   ├── phone_extractor.py    # Phone number extraction
+│   │   ├── email_extractor.py    # Email extraction
+│   │   ├── date_extractor.py     # Date extraction
+│   │   ├── name_extractor.py     # Name extraction
+│   │   ├── address_extractor.py  # Address extraction
+│   │   ├── pincode_extractor.py  # Pincode extraction
+│   │   └── country_extractor.py  # Country extraction
+│   │
+│   ├── validators/                # ✅ Data Validators
+│   │   ├── __init__.py
+│   │   ├── phone_validator.py    # Phone validation
+│   │   ├── email_validator.py    # Email validation
+│   │   ├── date_validator.py     # Date validation
+│   │   └── pincode_validator.py  # Pincode validation
+│   │
+│   ├── prompts/                   # 💬 Prompt Templates
+│   │   ├── __init__.py
+│   │   ├── system_prompts.py     # System prompts
+│   │   ├── templates.py          # Message templates
+│   │   └── builder.py            # Prompt builder
+│   │
+│   ├── services/                  # 🛠️ Business Services
+│   │   ├── __init__.py
+│   │   ├── memory_service.py     # Session memory management
+│   │   ├── phone_service.py      # Phone number services
+│   │   ├── otp_service.py        # OTP generation/verification
+│   │   ├── booking_service.py    # Booking operations
+│   │   └── knowledge_base_service.py  # ✅ KB + Groq LLM (NEW!)
+│   │
+│   ├── utils/                     # 🧰 Utility Functions
+│   │   ├── __init__.py
+│   │   ├── patterns.py           # Regex patterns
+│   │   ├── formatters.py         # Data formatters
+│   │   └── helpers.py            # Helper functions
+│   │
+│   ├── config/                    # ⚙️ Configuration
+│   │   ├── __init__.py
+│   │   ├── services_config.py    # Services & packages config
+│   │   └── settings.py           # General settings
+│   │
+│   └── api/                       # 🌐 API Layer
+│       ├── __init__.py
+│       ├── router.py             # Agent router factory
+│       └── endpoints.py          # Endpoint handlers
 │
-├── requirements.txt             # 📦 Python dependencies
-├── .env                         # 🔒 Environment secrets (create this)
-└── README.md                    # 📖 This file
+├── requirements.txt                # 📦 Python dependencies
+├── .env                           # 🔒 Environment secrets (create this)
+└── README.md                      # 📖 This file
 ```
 
 ---
@@ -46,43 +117,139 @@ pip install -r requirements.txt
 ### 2️⃣ Configure Environment
 Create `.env` file:
 ```env
-# AI & Database
-GROQ_API_KEY=your_groq_api_key_here
-MONGO_URI=mongodb://localhost:27017
+# Database
+MONGODB_URL=mongodb+srv://user:pass@cluster.mongodb.net/db?retryWrites=true&w=majority
+
+# AI Services
+GROQ_API_KEY=gsk_your_groq_api_key_here
+ANTHROPIC_API_KEY=sk-ant-api03-your_key_here  # Optional
 
 # Authentication
-JWT_SECRET=your_super_secret_jwt_key_change_this
+JWT_SECRET_KEY=your_super_secret_jwt_key_change_this_in_production
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=secure_password_here
 
 # Twilio WhatsApp
-TWILIO_ACCOUNT_SID=your_twilio_account_sid
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_twilio_auth_token
 TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 
-# Email (Brevo for production, SMTP for local)
-BREVO_API_KEY=your_brevo_api_key
+# Email Service (Brevo for production)
+BREVO_API_KEY=xkeysib-your_brevo_api_key
+BREVO_SENDER_EMAIL=noreply@yourdomain.com
+BREVO_SENDER_NAME=JinniChirag
+
+# Email Service (SMTP for development)
 SMTP_EMAIL=your_email@gmail.com
 SMTP_PASSWORD=your_app_specific_password
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
 
 # Frontend
 FRONTEND_URL=https://yourdomain.com
 ```
 
-### 3️⃣ Run Server
-```bash
-# Method 1: Direct Python
-python app.py
+### 3️⃣ Initialize Database
+```python
+# Run once to create admin user
+python -c "
+from database import admins_collection
+from security import get_password_hash
+import os
 
-# Method 2: Uvicorn with auto-reload
+admins_collection.insert_one({
+    'email': os.getenv('ADMIN_USERNAME', 'admin@example.com'),
+    'password': get_password_hash(os.getenv('ADMIN_PASSWORD', 'admin123')),
+    'role': 'admin'
+})
+print('✅ Admin user created!')
+"
+```
+
+### 4️⃣ Run Server
+```bash
+# Development with auto-reload
 uvicorn app:app --reload --port 8000
 
-# Method 3: Production
+# Production
 uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-### 4️⃣ Test API
+### 5️⃣ Test API
 ```bash
 curl http://localhost:8000/health
 ```
+
+---
+
+## 🤖 Modular Agent Architecture
+
+### 🎯 How It Works
+
+```mermaid
+graph TD
+    A[User Message] --> B[API Endpoint]
+    B --> C[Orchestrator]
+    C --> D{FSM Process}
+    D -->|Understood| E[Update State]
+    D -->|Not Understood| F[Knowledge Base]
+    E --> G[Extractors]
+    G --> H[Validators]
+    H --> I[Next State]
+    F --> J[Groq LLM]
+    J --> K[Answer + Continue Flow]
+    I --> L[Response]
+    K --> L
+    L --> M[User]
+```
+
+### 📦 Module Breakdown
+
+#### 1. **Orchestrator** (`agent/orchestrator.py`)
+- **Role**: Main coordinator - routes messages through FSM
+- **Features**:
+  - Session management
+  - Off-track counter (switches to chat mode after 6 attempts)
+  - Knowledge base integration
+  - OTP handling
+  - Flow state maintenance
+
+#### 2. **FSM Engine** (`agent/engine/fsm.py`)
+- **Role**: Finite State Machine - determines next state
+- **States**: 
+  - `greeting` → `selecting_service` → `selecting_package` → `collecting_details` → `confirming` → `otp_sent` → `completed`
+- **Features**:
+  - Intent detection
+  - Service/package selection (supports "1", "2", "3")
+  - Multi-field extraction
+  - Returns `understood: True/False` flag
+
+#### 3. **Extractors** (`agent/extractors/`)
+- **Phone**: Detects phone numbers with country codes
+- **Email**: Validates and extracts emails
+- **Date**: Parses natural language dates
+- **Name**: Extracts person names
+- **Address**: Detects addresses
+- **Pincode**: Validates PIN/postal codes
+- **Country**: Detects countries from text
+
+#### 4. **Validators** (`agent/validators/`)
+- Validates extracted data
+- Ensures data quality before saving
+
+#### 5. **Services** (`agent/services/`)
+- **Memory Service**: Session management (2-hour TTL)
+- **OTP Service**: Generate, send, verify OTP
+- **Booking Service**: Save to MongoDB, send confirmations
+- **Knowledge Base Service**: ✅ **Groq LLM integration** for answering questions
+
+#### 6. **Knowledge Base Service** (`agent/services/knowledge_base_service.py`)
+- **Features**:
+  - Loads knowledge from MongoDB
+  - 4-language support (English, Hindi, Nepali, Marathi)
+  - Groq LLM for natural responses
+  - Context-aware (knows current booking state)
+  - Short, concise answers (2-4 sentences)
 
 ---
 
@@ -102,185 +269,173 @@ GET /health
 }
 ```
 
-#### Simple Q&A Chatbot
+---
+
+### 🤖 Agent Chatbot - Conversational Booking
+
+#### Start/Continue Conversation
 ```http
-POST /chat
+POST /agent/chat
 Content-Type: application/json
 
 {
-  "messages": [
-    {"role": "user", "content": "What services do you offer?"}
-  ],
+  "message": "I want bridal makeup for December 25",
+  "session_id": "optional_session_id",
   "language": "en"
 }
 ```
+
+**Languages:** `en` (English), `hi` (Hindi), `ne` (Nepali), `mr` (Marathi)
+
 **Response:**
 ```json
 {
-  "reply": "We offer Bridal Makeup, Party Makeup, Engagement Makeup..."
+  "reply": "Wonderful! Which package would you like? 1) Basic (₹15,999) 2) Premium (₹49,999) 3) Luxury (₹99,999)",
+  "session_id": "abc123xyz",
+  "stage": "selecting_package",
+  "action": "continue",
+  "missing_fields": ["package", "name", "email", "phone", "address", "pincode", "service_country"],
+  "collected_info": {
+    "service": "Bridal Makeup Services",
+    "event_date": "2024-12-25"
+  },
+  "booking_id": null,
+  "off_track_count": 0
 }
 ```
 
-**Languages:** `en` (English), `ne` (Nepali), `hi` (Hindi), `mr` (Marathi)
+#### Complete Flow Example
 
-#### Form-Based Booking Flow
-
-**Step 1: Request OTP**
-```http
-POST /bookings/request
-Content-Type: application/json
-
-{
-  "service": "Bridal Makeup",
-  "package": "Premium",
-  "name": "Priya Sharma",
-  "email": "priya@example.com",
-  "phone": "+977-9876543210",
-  "phone_country": "Nepal",
-  "service_country": "Nepal",
-  "address": "Thamel, Kathmandu",
-  "pincode": "44600",
-  "date": "2024-12-25",
-  "message": "Wedding day makeup"
-}
+**Step 1: Initial Intent**
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I want bridal makeup",
+    "language": "en"
+  }'
 ```
-**Response:**
+Response: Shows service options
+
+**Step 2: Select Service**
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "1",
+    "session_id": "abc123xyz",
+    "language": "en"
+  }'
+```
+Response: Shows package options
+
+**Step 3: Ask Question (Off-Track)**
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "What is your Instagram?",
+    "session_id": "abc123xyz",
+    "language": "en"
+  }'
+```
+Response: 
 ```json
 {
-  "booking_id": "xyz789abc",
-  "message": "OTP sent via WhatsApp"
+  "reply": "You can follow us on Instagram @chiragsharma_makeupartist.\n\n📦 Please select your package (1-3):\n1. Basic - ₹15,999\n2. Premium - ₹49,999\n3. Luxury - ₹99,999",
+  "off_track_count": 1
 }
 ```
+✅ **Answers question AND maintains booking flow!**
 
-**Step 2: Verify OTP**
-```http
-POST /bookings/verify-otp
-Content-Type: application/json
-
-{
-  "booking_id": "xyz789abc",
-  "otp": "123456"
-}
+**Step 4: Continue Booking**
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "2",
+    "session_id": "abc123xyz",
+    "language": "en"
+  }'
 ```
-**Response:**
+Response: Asks for name
+
+**Step 5-9: Provide Details**
+- Name: "Priya Sharma"
+- Email: "priya@example.com"
+- Phone: "+977-9876543210"
+- Address: "Thamel, Kathmandu"
+- Pincode: "44600"
+- Country: "Nepal"
+
+**Step 10: OTP Sent**
 ```json
 {
-  "message": "Booking confirmed",
+  "reply": "Perfect! I've sent a 6-digit OTP to +977-98****3210. Please enter it here.",
+  "stage": "otp_sent",
+  "action": "send_otp",
+  "booking_id": "xyz789"
+}
+```
+
+**Step 11: Verify OTP**
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "123456",
+    "session_id": "abc123xyz",
+    "language": "en"
+  }'
+```
+Response:
+```json
+{
+  "reply": "🎉 Congratulations Priya! Your booking is confirmed!",
+  "stage": "greeting",
+  "action": "booking_confirmed",
   "booking_id": "507f1f77bcf86cd799439011"
 }
 ```
 
 ---
 
-### 🤖 Agentic Chatbot (Conversational Booking)
+#### Agent Management Endpoints
 
-#### How It Works
-
-```mermaid
-graph TD
-    A[User: I want bridal makeup] --> B[Agent extracts intent]
-    B --> C{All info collected?}
-    C -->|No| D[Agent: What's your name?]
-    D --> E[User provides info]
-    E --> B
-    C -->|Yes| F[Send OTP to WhatsApp]
-    F --> G[User provides OTP in chat]
-    G --> H[Verify OTP]
-    H --> I[Booking Confirmed!]
-```
-
-#### Conversation Flow
-
-**Stage 1: Initial Contact**
+**Get Active Sessions**
 ```http
-POST /agent/chat
-Content-Type: application/json
-
-{
-  "message": "Hi, I need bridal makeup",
-  "language": "en"
-}
+GET /agent/sessions
 ```
 **Response:**
 ```json
 {
-  "reply": "Wonderful! Bridal makeup is our specialty. What's your name?",
-  "session_id": "abc123xyz",
-  "stage": "collecting_info",
-  "action": "continue",
-  "missing_fields": ["name", "email", "phone", "address", "date", ...],
-  "booking_id": null
+  "sessions": [
+    {
+      "session_id": "abc123xyz",
+      "language": "en",
+      "stage": "collecting_details",
+      "created_at": "2024-01-21T10:30:00Z",
+      "updated_at": "2024-01-21T10:35:00Z"
+    }
+  ],
+  "count": 1
 }
 ```
 
-**Stage 2: Continue Conversation**
+**Delete Session**
 ```http
-POST /agent/chat
-Content-Type: application/json
-
-{
-  "message": "My name is Priya Sharma",
-  "session_id": "abc123xyz",
-  "language": "en"
-}
-```
-**Response:**
-```json
-{
-  "reply": "Nice to meet you, Priya! What's your email address?",
-  "session_id": "abc123xyz",
-  "stage": "collecting_info",
-  "action": "continue",
-  "missing_fields": ["email", "phone", "address", "date", ...],
-  "booking_id": null
-}
+DELETE /agent/sessions/{session_id}
 ```
 
-**Stage 3: All Info Collected → OTP Sent**
-```json
-{
-  "reply": "Perfect! I've sent a 6-digit OTP to your WhatsApp. Please share it here.",
-  "session_id": "abc123xyz",
-  "stage": "otp_sent",
-  "action": "send_otp",
-  "missing_fields": [],
-  "booking_id": "xyz789"
-}
-```
-
-**Stage 4: OTP Verification**
+**Manual Cleanup**
 ```http
-POST /agent/chat
-Content-Type: application/json
-
-{
-  "message": "123456",
-  "session_id": "abc123xyz",
-  "language": "en"
-}
-```
-**Response:**
-```json
-{
-  "reply": "🎉 Congratulations Priya! Your booking is confirmed!",
-  "session_id": "abc123xyz",
-  "stage": "confirmed",
-  "action": "booking_confirmed",
-  "missing_fields": [],
-  "booking_id": "xyz789"
-}
+POST /agent/cleanup
 ```
 
-#### Agent Features
-
-✅ **Intent Extraction** - Automatically extracts booking details from natural conversation
-✅ **Memory Management** - Remembers entire conversation context
-✅ **Multi-turn Conversation** - Handles back-and-forth naturally
-✅ **Smart Field Collection** - Asks for ONE thing at a time
-✅ **Flexible Input** - User can provide info in any order
-✅ **Auto OTP** - Sends OTP when all details collected
-✅ **In-Chat Verification** - No need to switch to separate OTP form
-✅ **Multi-language** - Works in 4 languages
+**Agent Health Check**
+```http
+GET /agent/health
+```
 
 ---
 
@@ -315,12 +470,6 @@ Content-Type: application/json
   "email": "admin@example.com"
 }
 ```
-**Response:**
-```json
-{
-  "message": "If your email is registered, you will receive a password reset link"
-}
-```
 
 #### Reset Password
 ```http
@@ -332,25 +481,11 @@ Content-Type: application/json
   "new_password": "newSecurePass123"
 }
 ```
-**Response:**
-```json
-{
-  "message": "Password reset successful"
-}
-```
 
 #### Verify Token
 ```http
 GET /admin/verify-token
-Authorization: Bearer <your_jwt_token>
-```
-**Response:**
-```json
-{
-  "valid": true,
-  "email": "admin@example.com",
-  "role": "admin"
-}
+Authorization: Bearer <jwt_token>
 ```
 
 ---
@@ -364,26 +499,6 @@ Authorization: Bearer <your_jwt_token>
 GET /admin/bookings?status=pending&limit=50&skip=0
 Authorization: Bearer <jwt_token>
 ```
-**Response:**
-```json
-{
-  "bookings": [
-    {
-      "_id": "507f1f77bcf86cd799439011",
-      "service": "Bridal Makeup",
-      "package": "Premium",
-      "name": "Priya Sharma",
-      "email": "priya@example.com",
-      "phone": "+977-9876543210",
-      "status": "pending",
-      "created_at": "2024-01-21T10:30:00Z"
-    }
-  ],
-  "total": 15,
-  "limit": 50,
-  "skip": 0
-}
-```
 
 #### Search Bookings
 ```http
@@ -395,21 +510,19 @@ Content-Type: application/json
   "search": "Priya",
   "status": "pending",
   "date_from": "2024-01-01",
-  "date_to": "2024-12-31",
-  "limit": 50,
-  "skip": 0
+  "date_to": "2024-12-31"
 }
 ```
 
 #### Get Booking Details
 ```http
-GET /admin/bookings/507f1f77bcf86cd799439011
+GET /admin/bookings/{booking_id}
 Authorization: Bearer <jwt_token>
 ```
 
 #### Update Booking Status
 ```http
-PATCH /admin/bookings/507f1f77bcf86cd799439011/status
+PATCH /admin/bookings/{booking_id}/status
 Authorization: Bearer <jwt_token>
 Content-Type: application/json
 
@@ -421,19 +534,19 @@ Content-Type: application/json
 **Status Options:** `pending`, `approved`, `completed`, `cancelled`
 
 **WhatsApp Notifications:**
-- `approved` → Confirmation message sent
-- `cancelled` → Apology message sent
-- `completed` → Thank you message sent
+- `approved` → Confirmation sent
+- `cancelled` → Apology sent
+- `completed` → Thank you sent
 
 #### Delete Booking
 ```http
-DELETE /admin/bookings/507f1f77bcf86cd799439011
+DELETE /admin/bookings/{booking_id}
 Authorization: Bearer <jwt_token>
 ```
 
 ---
 
-### 📚 Admin Knowledge Base
+### 📚 Admin Knowledge Base Management
 
 **All endpoints require:** `Authorization: Bearer <jwt_token>`
 
@@ -445,27 +558,56 @@ Content-Type: application/json
 
 {
   "title": "Bridal Makeup Packages",
-  "content": "We offer 3 packages: Basic (₹10k), Premium (₹20k), Deluxe (₹30k)...",
+  "content": "We offer 3 bridal packages: Basic (₹15,999), Premium (₹49,999), and Luxury (₹99,999). All packages include professional makeup, premium products, and on-site service.",
+  "category": "Services",
   "language": "en",
   "is_active": true
 }
 ```
 
+**Response:**
+```json
+{
+  "message": "Knowledge entry created",
+  "id": "507f1f77bcf86cd799439011"
+}
+```
+
 #### List Knowledge Entries
 ```http
-GET /admin/knowledge?language=en&is_active=true
+GET /admin/knowledge?language=en&is_active=true&limit=50&skip=0
 Authorization: Bearer <jwt_token>
+```
+
+**Response:**
+```json
+{
+  "entries": [
+    {
+      "_id": "507f1f77bcf86cd799439011",
+      "title": "Bridal Makeup Packages",
+      "content": "We offer 3 bridal packages...",
+      "category": "Services",
+      "language": "en",
+      "is_active": true,
+      "created_at": "2024-01-21T10:00:00Z"
+    }
+  ],
+  "total": 15,
+  "limit": 50,
+  "skip": 0
+}
 ```
 
 #### Get Single Entry
 ```http
-GET /admin/knowledge/507f1f77bcf86cd799439011
+GET /admin/knowledge/{entry_id}
 Authorization: Bearer <jwt_token>
 ```
 
 #### Update Entry
 ```http
-PATCH /admin/knowledge/507f1f77bcf86cd799439011
+PATCH /admin/knowledge/{entry_id}
 Authorization: Bearer <jwt_token>
 Content-Type: application/json
 
@@ -477,7 +619,7 @@ Content-Type: application/json
 
 #### Delete Entry
 ```http
-DELETE /admin/knowledge/507f1f77bcf86cd799439011
+DELETE /admin/knowledge/{entry_id}
 Authorization: Bearer <jwt_token>
 ```
 
@@ -492,6 +634,7 @@ Authorization: Bearer <jwt_token>
 GET /admin/analytics/overview
 Authorization: Bearer <jwt_token>
 ```
+
 **Response:**
 ```json
 {
@@ -510,243 +653,71 @@ Authorization: Bearer <jwt_token>
 GET /admin/analytics/by-service
 Authorization: Bearer <jwt_token>
 ```
-**Response:**
-```json
-{
-  "services": [
-    {"service": "Bridal Makeup", "count": 85},
-    {"service": "Party Makeup", "count": 42},
-    {"service": "Engagement Makeup", "count": 23}
-  ]
-}
-```
 
 #### Monthly Trends
 ```http
 GET /admin/analytics/by-month
 Authorization: Bearer <jwt_token>
 ```
-**Response:**
-```json
-{
-  "monthly_data": [
-    {"year": 2024, "month": 1, "count": 15},
-    {"year": 2023, "month": 12, "count": 22}
-  ]
-}
-```
 
 ---
 
-## 🧠 How the Agentic Chatbot Works
+## 🧠 Agent Intelligence Features
 
-### Architecture Overview
+### ✅ What Makes It Smart
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     USER MESSAGE                             │
-│              "I want bridal makeup for Dec 25"               │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              SESSION MANAGEMENT                              │
-│  • Get/Create session_id                                    │
-│  • Load ConversationMemory from store                       │
-│  • TTL: 2 hours auto-expire                                 │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              INTENT EXTRACTION (AI)                          │
-│  • Parse message using GROQ AI                              │
-│  • Extract: service="Bridal Makeup", date="2024-12-25"     │
-│  • Merge with existing BookingIntent                        │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              CHECK MISSING FIELDS                            │
-│  Required: service, package, name, email, phone,            │
-│            phone_country, service_country, address,         │
-│            pincode, date                                    │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                ┌────────┴────────┐
-                │                 │
-          All Collected      Missing Info
-                │                 │
-                ▼                 ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │  SEND OTP        │  │  ASK FOR NEXT    │
-    │  • Generate 6    │  │  • Generate AI   │
-    │    digits        │  │    response      │
-    │  • Store temp    │  │  • Ask for 1     │
-    │  • Send WhatsApp │  │    missing field │
-    │  • stage=otp_sent│  │  • Continue loop │
-    └──────────────────┘  └──────────────────┘
-                │
-                ▼
-    ┌──────────────────────────┐
-    │  USER PROVIDES OTP       │
-    │  "123456"                │
-    └──────────┬───────────────┘
-               │
-               ▼
-    ┌──────────────────────────┐
-    │  VERIFY OTP              │
-    │  • Check match           │
-    │  • Check expiry          │
-    │  • Max 3 attempts        │
-    └──────────┬───────────────┘
-               │
-          ┌────┴─────┐
-      Valid      Invalid
-          │           │
-          ▼           ▼
-    ┌─────────┐  ┌──────────┐
-    │ SAVE TO │  │ RETRY    │
-    │ MongoDB │  │ (3x max) │
-    │ Confirm │  └──────────┘
-    └─────────┘
-```
+1. **Natural Language Understanding**
+   - Understands "I want bridal makeup for my wedding next month"
+   - Extracts: service=Bridal, date=next month
 
-### Conversation Stages
+2. **Context Maintenance**
+   - Remembers entire conversation
+   - Doesn't ask for information twice
 
-| Stage | Description | Agent Action |
-|-------|-------------|--------------|
-| `greeting` | Initial contact | Welcome, understand intent |
-| `collecting_info` | Gathering details | Ask for missing fields one-by-one |
-| `otp_sent` | OTP dispatched | Wait for 6-digit code |
-| `otp_verification` | Validating code | Check OTP, create booking if valid |
-| `confirmed` | Booking complete | Send confirmation, cleanup session |
+3. **Off-Track Handling**
+   - User asks "What's your Instagram?" → Answers AND continues booking
+   - Maintains booking state perfectly
+   - Switches to chat mode after 6 off-track questions
 
-### Example Conversation
+4. **Multi-Field Extraction**
+   - "My name is Priya, email priya@example.com, phone +977-9876543210"
+   - Extracts all 3 fields at once
 
-```
-👤 User: Hi, I need makeup for my wedding
-🤖 Agent: Wonderful! Bridal makeup is our specialty. What's your name?
-[Intent extracted: service="Bridal Makeup"]
+5. **Flexible Input**
+   - Accepts "1" or "Bridal Makeup" or "I want bridal package"
+   - Understands natural variations
 
-👤 User: Priya Sharma
-🤖 Agent: Nice to meet you, Priya! What's your email?
-[Intent updated: name="Priya Sharma"]
+6. **Smart Prompting**
+   - Asks for ONE thing at a time
+   - Shows progress
+   - Contextual hints
 
-👤 User: priya@example.com
-🤖 Agent: Great! What's your phone number?
-[Intent updated: email="priya@example.com"]
-
-👤 User: +977-9876543210
-🤖 Agent: Which package would you like - Basic, Premium, or Deluxe?
-[Intent updated: phone="+977-9876543210", phone_country="Nepal"]
-
-👤 User: Premium please
-🤖 Agent: Excellent choice! Where will the service be provided?
-[Intent updated: package="Premium"]
-
-👤 User: Kathmandu, Nepal
-🤖 Agent: What's your full address?
-[Intent updated: service_country="Nepal"]
-
-👤 User: Thamel, Kathmandu
-🤖 Agent: What's the pincode?
-[Intent updated: address="Thamel, Kathmandu"]
-
-👤 User: 44600
-🤖 Agent: When would you like the service?
-[Intent updated: pincode="44600"]
-
-👤 User: December 25, 2024
-🤖 Agent: ✅ Perfect! I've sent a 6-digit OTP to +977-9876543210 
-         Please share it here to confirm your booking.
-[All fields collected → OTP sent, stage="otp_sent"]
-
-👤 User: 123456
-🤖 Agent: 🎉 Congratulations Priya! Your booking is confirmed!
-         You'll receive a WhatsApp message once approved.
-[OTP verified → Booking saved, stage="confirmed"]
-```
+7. **Knowledge Base Integration**
+   - Powered by Groq LLM (llama-3.1-8b-instant)
+   - 4-language support
+   - Short, natural responses
+   - Doesn't repeat "according to knowledge base"
 
 ---
 
-## 🏗️ System Architecture
+## 🌍 Multi-Language Support
 
-### Module Responsibilities
+### Supported Languages
 
-| Module | Responsibility |
-|--------|---------------|
-| `app.py` | FastAPI initialization, CORS, router registration |
-| `config.py` | Environment variables, constants, configuration |
-| `database.py` | MongoDB connection, collections, indexes |
-| `models.py` | Pydantic models for request/response validation |
-| `security.py` | JWT tokens, password hashing, authentication |
-| `services.py` | WhatsApp (Twilio), Email (Brevo/SMTP), Knowledge loading |
-| `utils.py` | JSON serialization, helper functions |
-| `prompts.py` | AI system prompts for chatbot |
-| `routes_public.py` | Public endpoints (health, chat, bookings) |
-| `routes_agent.py` | Agentic chatbot endpoint |
-| `agent_models.py` | Agent state models (Intent, Memory, Response) |
-| `agent_service.py` | AI logic (intent extraction, response generation) |
-| `memory_store.py` | In-memory session storage (2-hour TTL) |
-| `routes_admin_*.py` | Admin endpoints (auth, bookings, knowledge, analytics) |
+| Language | Code | Example |
+|----------|------|---------|
+| 🇬🇧 English | `en` | "I want bridal makeup" |
+| 🇮🇳 Hindi | `hi` | "मुझे ब्राइडल मेकअप चाहिए" |
+| 🇳🇵 Nepali | `ne` | "मलाई ब्राइडल मेकअप चाहिन्छ" |
+| 🇮🇳 Marathi | `mr` | "मला ब्राइडल मेकअप हवा आहे" |
 
-### Data Flow
+### Language Features
 
-```
-┌──────────────┐
-│  User Input  │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────────┐
-│  Route Handler   │
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Pydantic Model  │ ← Validates request
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Service Layer   │ ← Business logic
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Database/API    │ ← Data persistence
-└──────┬───────────┘
-       │
-       ▼
-┌──────────────────┐
-│  Response        │ ← Serialized output
-└──────────────────┘
-```
-
----
-
-## 🔐 Security Features
-
-### Authentication
-- **JWT Tokens**: 24-hour expiration
-- **Password Hashing**: Bcrypt with salt
-- **Admin-Only Routes**: Protected by `get_current_admin` dependency
-- **Email Enumeration Prevention**: Same response for valid/invalid emails
-
-### Data Protection
-- **Environment Variables**: Secrets in `.env` file
-- **CORS**: Configured allowed origins
-- **Input Validation**: Pydantic models
-- **SQL Injection**: Protected by MongoDB ODM
-
-### Password Reset Flow
-1. User requests reset via email
-2. Secure token generated (1-hour expiry)
-3. Token hashed and stored in DB
-4. Email sent with reset link
-5. User clicks link, provides new password
-6. Token marked as used
-7. Password updated with bcrypt hash
+✅ **AI Responses** - Groq responds in selected language
+✅ **Knowledge Base** - Separate content per language
+✅ **Prompts** - Localized templates
+✅ **WhatsApp** - Messages in user's language
+✅ **Error Messages** - Translated
 
 ---
 
@@ -771,225 +742,219 @@ Authorization: Bearer <jwt_token>
   message: String,
   status: "pending" | "approved" | "completed" | "cancelled",
   otp_verified: Boolean,
-  source: "agent_chat" | undefined,  // Agent vs Form booking
+  source: "agent_chat" | undefined,
   created_at: DateTime,
   updated_at: DateTime
 }
 ```
 
-**Indexes:**
-- `created_at`: Sort by date
-- `status`: Filter by status
+**Indexes:** `created_at`, `status`
 
-#### `admins`
-```javascript
-{
-  _id: ObjectId,
-  email: String (unique),
-  password: String (bcrypt hashed),
-  role: "admin",
-  created_at: DateTime
-}
-```
-
-**Indexes:**
-- `email`: Unique index
-
-#### `reset_tokens`
-```javascript
-{
-  _id: ObjectId,
-  email: String,
-  token: String (bcrypt hashed),
-  used: Boolean,
-  created_at: DateTime,
-  expires_at: DateTime (TTL index, auto-delete)
-}
-```
-
-**Indexes:**
-- `expires_at`: TTL index (auto-cleanup)
-
-#### `knowledge_base`
+#### `knowledge_base` ✅ NEW!
 ```javascript
 {
   _id: ObjectId,
   title: String,
   content: String,
-  language: "en" | "ne" | "hi" | "mr",
+  category: String,
+  language: "en" | "hi" | "ne" | "mr",
   is_active: Boolean,
   created_at: DateTime,
   updated_at: DateTime
 }
 ```
 
-**Indexes:**
-- `language`: Filter by language
-- `is_active`: Filter active entries
+**Indexes:** `language`, `is_active`, `created_at`
+
+#### `admins`
+```javascript
+{
+  _id: ObjectId,
+  email: String (unique),
+  password: String (bcrypt),
+  role: "admin",
+  created_at: DateTime
+}
+```
+
+**Indexes:** `email` (unique)
+
+#### `reset_tokens`
+```javascript
+{
+  _id: ObjectId,
+  email: String,
+  token: String (bcrypt),
+  used: Boolean,
+  expires_at: DateTime (TTL)
+}
+```
+
+**Indexes:** `expires_at` (TTL auto-delete)
 
 ---
 
-## 🌍 Multi-Language Support
+## 🔐 Security Features
 
-### Supported Languages
-- 🇬🇧 **English** (`en`)
-- 🇳🇵 **Nepali** (`ne`)
-- 🇮🇳 **Hindi** (`hi`)
-- 🇮🇳 **Marathi** (`mr`)
+### Authentication
+- **JWT Tokens**: 24-hour expiration
+- **Password Hashing**: Bcrypt with salt
+- **Admin-Only Routes**: Protected by dependency injection
+- **Email Enumeration Prevention**: Same response for valid/invalid
 
-### How It Works
-1. **Knowledge Base**: Separate content for each language in MongoDB
-2. **AI Prompts**: Language-specific system prompts
-3. **Responses**: AI responds in selected language
-4. **Error Messages**: Localized for all languages
-5. **WhatsApp**: Messages sent in user's language
+### Data Protection
+- **Environment Variables**: Secrets in `.env`
+- **CORS**: Configured origins
+- **Input Validation**: Pydantic models
+- **Rate Limiting**: Can be added via middleware
+
+### OTP Security
+- **6-digit codes**: Randomly generated
+- **5-minute expiry**: Auto-cleanup
+- **3 attempts max**: Prevents brute force
+- **WhatsApp delivery**: Secure channel
 
 ---
 
 ## 🛠️ Development Guide
 
-### Adding a New Route
+### Adding Knowledge Base Content
 
-**1. Create route function:**
 ```python
-# routes_public.py
-@router.get("/new-endpoint")
-async def new_endpoint():
-    return {"message": "Hello"}
-```
-
-**2. Register in app.py:**
-```python
-# Already done - routes_public router is registered
-```
-
-### Adding a New Service
-
-**1. Add to services.py:**
-```python
-def new_service():
-    # Your logic here
-    pass
-```
-
-**2. Import and use:**
-```python
-from services import new_service
-
-@router.post("/use-service")
-async def use_service():
-    result = new_service()
-    return result
-```
-
-### Adding Admin Route
-
-**1. Create in appropriate admin file:**
-```python
-# routes_admin_bookings.py
-@router.get("/admin/new-feature")
-async def new_feature(admin: dict = Depends(get_current_admin)):
-    # Admin-only logic
-    return {"data": "protected"}
-```
-
----
-
-## 🧪 Testing
-
-### Manual Testing
-
-**Test Health:**
-```bash
-curl http://localhost:8000/health
-```
-
-**Test Chat:**
-```bash
-curl -X POST http://localhost:8000/chat \
+# Via API (recommended)
+curl -X POST http://localhost:8000/admin/knowledge \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": [{"role": "user", "content": "What services?"}],
-    "language": "en"
+    "title": "Social Media Links",
+    "content": "Instagram: @chiragsharma_makeupartist, Facebook: Chirag Sharma Makeup, YouTube: Chirag Sharma Official",
+    "category": "Contact",
+    "language": "en",
+    "is_active": true
   }'
+
+# Via MongoDB (direct)
+use jinnichirag_db
+db.knowledge_base.insertOne({
+  title: "Social Media Links",
+  content: "Instagram: @chiragsharma_makeupartist...",
+  category: "Contact",
+  language: "en",
+  is_active: true,
+  created_at: new Date()
+})
 ```
 
-**Test Agent:**
+### Testing Agent Locally
+
 ```bash
+# Test booking flow
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "I want bridal makeup", "language": "en"}'
+
+# Test question during booking
 curl -X POST http://localhost:8000/agent/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "message": "I want bridal makeup",
+    "message": "What is your Instagram?",
+    "session_id": "test123",
     "language": "en"
   }'
-```
 
-**Test Admin Login:**
-```bash
-curl -X POST http://localhost:8000/admin/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "admin@example.com",
-    "password": "password123"
-  }'
+# Should answer AND continue booking flow ✅
 ```
 
 ---
 
-## 📈 Performance Optimization
+## 📈 Performance & Scaling
 
-### Database Indexes
-All critical fields indexed for fast queries:
-- `bookings.created_at`
-- `bookings.status`
-- `admins.email` (unique)
-- `knowledge_base.language`
-
-### Caching Strategy
-- **Session Memory**: In-memory dict (2-hour TTL)
-- **Knowledge Base**: Loaded per request (can add Redis caching)
+### Current Architecture
+- **In-Memory Sessions**: 2-hour TTL, auto-cleanup
+- **MongoDB**: Single connection, indexed queries
+- **Groq API**: Rate limited (adjust max_tokens if needed)
 
 ### Production Recommendations
-1. **Use Redis** for session storage instead of in-memory
-2. **Enable MongoDB Connection Pooling**
-3. **Add Rate Limiting** on public endpoints
-4. **Enable GZIP Compression**
-5. **Use CDN** for static assets
+
+1. **Redis for Sessions**
+   ```python
+   # Replace memory_service.py with Redis backend
+   import redis
+   redis_client = redis.Redis(host='localhost', port=6379)
+   ```
+
+2. **Connection Pooling**
+   ```python
+   # database.py
+   client = MongoClient(
+       MONGODB_URL,
+       maxPoolSize=50,
+       minPoolSize=10
+   )
+   ```
+
+3. **Rate Limiting**
+   ```python
+   from fastapi_limiter import FastAPILimiter
+   from fastapi_limiter.depends import RateLimiter
+   
+   @app.post("/agent/chat", dependencies=[Depends(RateLimiter(times=10, seconds=60))])
+   ```
+
+4. **Caching**
+   ```python
+   # Cache knowledge base in Redis
+   @lru_cache(maxsize=100)
+   def get_knowledge(language: str):
+       ...
+   ```
+
+5. **Load Balancing**
+   ```bash
+   # Use Nginx or similar
+   upstream backend {
+       server 127.0.0.1:8000;
+       server 127.0.0.1:8001;
+       server 127.0.0.1:8002;
+   }
+   ```
 
 ---
 
 ## 🚨 Troubleshooting
 
-### Server Won't Start
-```bash
-# Check Python version (3.8+)
-python --version
+### Agent Not Detecting "1", "2", "3"
 
-# Verify all dependencies installed
-pip install -r requirements.txt
+**Issue:** User types "1" but agent doesn't select service
 
-# Check .env file exists
-ls -la .env
+**Solution:** Ensure you're using the FIXED `agent/engine/fsm.py`:
+```python
+# In _extract_service_selection()
+num_match = re.search(r'\b([1-4])\b', message)  # ✅ This should be present
 ```
 
-### MongoDB Connection Error
-```bash
-# Verify MongoDB running
-mongosh
+### Knowledge Base Not Loading
 
-# Check MONGO_URI in .env
-echo $MONGO_URI
-```
+**Issue:** Agent gives fallback message instead of KB content
+
+**Check:**
+1. MongoDB has entries: `db.knowledge_base.find()`
+2. Language matches: `{"language": "en", "is_active": true}`
+3. Groq API key is set: `echo $GROQ_API_KEY`
+
+### Agent Losing Booking State
+
+**Issue:** Agent forgets what was collected
+
+**Solution:** Ensure `orchestrator.py` has `_get_exact_next_step()` method that checks current state and missing fields
 
 ### OTP Not Sending
-- Verify Twilio credentials in `.env`
-- Check Twilio console for errors
-- Ensure phone number format: `+977-9876543210`
 
-### Agent Not Responding
-- Check GROQ_API_KEY in `.env`
-- Verify API quota not exceeded
-- Review logs for AI errors
+**Check:**
+1. Twilio credentials in `.env`
+2. Phone format: `+977-9876543210` (with country code)
+3. Twilio console for errors
+4. WhatsApp sandbox (if testing)
 
 ---
 
@@ -999,14 +964,15 @@ Proprietary software for JinniChirag Makeup Artist. All rights reserved.
 
 ---
 
-## 👨‍💻 Support
+## 👨‍💻 Support & Contact
 
-For issues or questions:
-1. Check this README
-2. Review error logs
-3. Test with provided curl commands
-4. Verify environment variables
+For issues:
+1. Check logs: `tail -f app.log`
+2. Verify environment: `python -c "import os; print(os.getenv('GROQ_API_KEY')[:10])"`
+3. Test endpoints with curl commands above
 
 ---
 
-**Built with ❤️ for JinniChirag Makeup Artist**
+**Built with ❤️ using FastAPI, MongoDB, Groq AI, and Twilio**
+
+**Modular Architecture** | **FSM-Based** | **4 Languages** | **Smart Booking Flow**
