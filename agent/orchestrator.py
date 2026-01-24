@@ -77,7 +77,12 @@ class AgentOrchestrator:
             
             if self._is_restart_request(message):
                 return await self._handle_restart(memory, language)
-            
+
+            # NEW: Check for chat mode requests
+            if self._is_chat_request(message):
+                logger.info(f"📞 User requested chat mode: {message[:50]}")
+                return await self._switch_to_chat_mode(memory, language)
+
             # Check for OTP resend request BEFORE processing
             if memory.stage == BookingState.OTP_SENT.value:
                 if self._is_resend_otp_request(message):
@@ -159,117 +164,56 @@ class AgentOrchestrator:
                 session_id_for_error
             )
     
+
+
     async def _handle_question_during_booking(self, message: str, memory: ConversationMemory, language: str) -> Dict[str, Any]:
-        """Answer question using knowledge base and continue booking"""
+        """Answer question using knowledge base and continue booking - IMPROVED"""
         try:
             logger.info(f"📚 Answering question during booking (off-track count: {memory.off_track_count}/{self.MAX_OFF_TRACK_ATTEMPTS})")
             
-            # Check if we're asking for year
+            msg_lower = message.lower()
+            
+            # 1. Check if we're asking for year (date completion)
             date_info = memory.intent.metadata.get('date_info', {})
             if date_info.get('needs_year', False):
-                # Check if this is a year response
                 if self._is_year_response(message):
-                    # Handle year response
-                    year_match = re.search(r'\b(20[2-9][0-9]|2100)\b', message)
-                    if year_match:
-                        year = int(year_match.group(1))
-                        
-                        # Update the date with provided year
-                        if memory.intent.date:
-                            try:
-                                # Parse current date and update year
-                                date_parts = memory.intent.date.split('-')
-                                if len(date_parts) == 3:
-                                    month = int(date_parts[1])
-                                    day = int(date_parts[2])
-                                    
-                                    # Create new date with provided year
-                                    new_date = datetime(year, month, day)
-                                    memory.intent.date = new_date.strftime('%Y-%m-%d')
-                                    
-                                    # Update metadata
-                                    memory.intent.metadata['date_info']['needs_year'] = False
-                                    memory.intent.metadata['date_info']['user_provided_year'] = year
-                                    memory.intent.metadata['date_info']['assumed_year'] = year
-                                    
-                                    # Show updated summary
-                                    missing = memory.intent.missing_fields()
-                                    summary = self.fsm._get_collected_summary_prompt(memory.intent, missing, language)
-                                    
-                                    reply = f"✅ **Year updated to {year}**\n\n{summary}"
-                                    
-                                    memory.add_message("assistant", reply)
-                                    self.memory_service.update_session(memory.session_id, memory)
-                                    
-                                    return self._build_response(
-                                        reply=reply,
-                                        memory=memory,
-                                        action="year_updated",
-                                        metadata={
-                                            "year_provided": year,
-                                            "updated_date": memory.intent.date
-                                        }
-                                    )
-                            except Exception as e:
-                                logger.error(f"Error updating year: {e}")
+                    return await self._handle_year_response(message, memory, language)
             
+            # 2. Check for chat requests
+            if self._is_chat_request(msg_lower):
+                logger.info(f"📞 User requested chat mode during booking")
+                return await self._switch_to_chat_mode(memory, language)
+            
+            # 3. Check for service comparison requests
+            requested_service = self._extract_requested_service(msg_lower)
+            if requested_service and memory.intent.service != requested_service:
+                return await self._handle_service_comparison(message, requested_service, memory, language)
+            
+            # 4. Handle booking-specific questions first (these are critical for flow)
+            booking_specific_answer = await self._handle_booking_specific_questions(message, memory, language)
+            if booking_specific_answer:
+                # We have a booking-specific answer, show it with continuation
+                return await self._show_answer_with_continuation(booking_specific_answer, message, memory, language)
+            
+            # 5. For ALL OTHER questions, use knowledge base
             # Build context about current booking state
             context = self._build_booking_context(memory)
             
-            # Get answer from knowledge base using LLM
+            # Get answer from knowledge base
             answer = await self.knowledge_base_service.get_answer(message, language, context)
             
-            # Get current state and show collected summary + missing fields
-            state_enum = BookingState.from_string(memory.stage)
-            missing = memory.intent.missing_fields()
+            # If knowledge base returns answer, use it
+            if answer:
+                return await self._show_answer_with_continuation(answer, message, memory, language)
             
-            if state_enum == BookingState.COLLECTING_DETAILS and missing:
-                # Show what we have and what we need
-                continuation = self.fsm._get_collected_summary_prompt(memory.intent, missing, language)
-            else:
-                # For other states, use standard continuation
-                continuation = self._get_booking_continuation(state_enum, memory, language)
-            
-            # Combine: Answer + booking continuation
-            if answer and continuation:
-                reply = f"{answer}\n\n{continuation}"
-            elif answer:
-                reply = answer
-            else:
-                reply = continuation
-            
-            memory.add_message("assistant", reply)
-            self.memory_service.update_session(memory.session_id, memory)
-            
-            return self._build_response(
-                reply=reply,
-                memory=memory,
-                action="question_answered",
-                metadata={
-                    "question": message,
-                    "answer": answer,
-                    "off_track_count": memory.off_track_count,
-                    "max_attempts": self.MAX_OFF_TRACK_ATTEMPTS
-                }
-            )
+            # 6. Fallback for when knowledge base has no answer
+            # Only use generic fallback, not specific content
+            fallback_answer = self._get_generic_fallback_answer(message, language)
+            return await self._show_answer_with_continuation(fallback_answer, message, memory, language)
             
         except Exception as e:
             logger.error(f"Error answering question: {e}", exc_info=True)
-            
-            # Fallback: just continue with booking
-            state_enum = BookingState.from_string(memory.stage)
-            continuation = self._get_booking_continuation(state_enum, memory, language)
-            
-            reply = f"I understand. {continuation}"
-            memory.add_message("assistant", reply)
-            self.memory_service.update_session(memory.session_id, memory)
-            
-            return self._build_response(
-                reply=reply,
-                memory=memory,
-                action="continue",
-                metadata={"error": str(e)}
-            )
+            return await self._handle_question_error(memory, language, e)
     
 
     def _is_year_response(self, message: str) -> bool:
@@ -277,18 +221,482 @@ class AgentOrchestrator:
         year_match = re.search(r'\b(20[2-9][0-9]|2100)\b', message)
         return bool(year_match)
 
+    def _is_chat_request(self, message: str) -> bool:
+        """Check if user wants to switch to chat mode"""
+        msg_lower = message.lower().strip()
+        
+        chat_keywords = [
+            'i want to chat', 'want to chat', 'let\'s chat', 'just chat',
+            'don\'t book', 'don\'t ask me to book', 'not booking',
+            'just talking', 'only chat', 'chat only', 'chat mode',
+            'talk about', 'discuss', 'have a conversation', 'chat',
+            'converse', 'talk', 'speak', 'have a talk', 'have discussion',
+            'cancel booking and chat', 'stop booking and chat',
+            'no booking just chat', 'skip booking'
+        ]
+        
+        return any(kw in msg_lower for kw in chat_keywords)
+
+    def is_service_switch_request(self, message: str) -> Tuple[bool, Optional[str]]:
+        """Check if user wants to switch to a different service"""
+        msg_lower = message.lower()
+        
+        # First exclude social media questions
+        social_keywords =[
+            'instagram', 'facebook', 'twitter', 'youtube', 'linkedin',
+            'social media', 'social', 'media', 'follow', 'subscriber', 
+            'subscribers', 'channel', 'profile', 'page', 'account',
+            'handle', 'username', 'link', 'website', 'web', 'site',
+            'online', 'internet', 'net', 'whatsapp channel', 'telegram',
+            'tiktok', 'snapchat', 'pinterest'
+        ]
+        if any(keyword in msg_lower for keyword in social_keywords):
+            return False, None
+        
+        switch_patterns = {
+            'bridal': 'Bridal Makeup Services',
+            'bride': 'Bridal Makeup Services',
+            'wedding': 'Bridal Makeup Services',
+            'party': 'Party Makeup Services',
+            'function': 'Party Makeup Services',
+            'celebration': 'Party Makeup Services',
+            'engagement': 'Engagement & Pre-Wedding Makeup',
+            'pre-wedding': 'Engagement & Pre-Wedding Makeup',
+            'sangeet': 'Engagement & Pre-Wedding Makeup',
+            'henna': 'Henna (Mehendi) Services',
+            'mehendi': 'Henna (Mehendi) Services',
+            'mehndi': 'Henna (Mehendi) Services'
+        }
+        
+        for keyword, service in switch_patterns.items():
+            if keyword in msg_lower:
+                # Check if this is different from current
+                return True, service
+        
+        return False, None
+
+
+
+
+    def _extract_requested_service(self, message: str) -> Optional[str]:
+        """Extract service name from message"""
+        msg_lower = message.lower()
+        
+        # First check if it's about social media (not a service)
+        social_keywords = [
+            'instagram', 'facebook', 'twitter', 'youtube', 'linkedin',
+            'social media', 'social', 'media', 'follow', 'subscriber', 
+            'subscribers', 'channel', 'profile', 'page', 'account',
+            'handle', 'username', 'link', 'website', 'web', 'site',
+            'online', 'internet', 'net', 'whatsapp channel', 'telegram',
+            'tiktok', 'snapchat', 'pinterest']
+        if any(keyword in msg_lower for keyword in social_keywords):
+            return None
+        
+        # Only then check for services
+        service_keywords = {
+            'bridal': 'Bridal Makeup Services',
+            'party': 'Party Makeup Services', 
+            'engagement': 'Engagement & Pre-Wedding Makeup',
+            'pre-wedding': 'Engagement & Pre-Wedding Makeup',
+            'henna': 'Henna (Mehendi) Services',
+            'mehendi': 'Henna (Mehendi) Services',
+            'mehndi': 'Henna (Mehendi) Services'
+        }
+        
+        for keyword, service_name in service_keywords.items():
+            if keyword in msg_lower:
+                return service_name
+        
+        return None
+
+    async def _handle_booking_specific_questions(
+        self,
+        message: str,
+        memory: ConversationMemory,
+        language: str
+    ) -> Optional[str]:
+        """Handle booking-specific questions that need special handling"""
+
+        msg_lower = message.lower().strip()
+
+        # --------------------------------------------------
+        # 0️⃣ FIX: Address incorrectly contains date info
+        # --------------------------------------------------
+        if memory.intent.address:
+            address_lower = memory.intent.address.lower()
+
+            month_names = [
+                "january", "february", "march", "april", "may", "june",
+                "july", "august", "september", "october", "november", "december",
+                # short forms (very important)
+                "jan", "feb", "mar", "apr", "jun", "jul",
+                "aug", "sep", "sept", "oct", "nov", "dec"
+            ]
+
+            has_month = any(month in address_lower for month in month_names)
+            has_year = any(year in address_lower for year in ["2024", "2025", "2026", "2027", "2028"])
+
+            # Heuristic: month + year OR number + month
+            if has_month and (has_year or any(ch.isdigit() for ch in address_lower)):
+                memory.intent.address = None
+                logger.warning(
+                    "Cleared address field because it contained date-like information"
+                )
+
+        # --------------------------------------------------
+        # 1️⃣ HARD EXCLUSION: Social / Online presence queries
+        # --------------------------------------------------
+        social_media_keywords = [
+            "instagram", "facebook", "twitter", "x", "youtube", "linkedin",
+            "social media", "social", "media", "follow", "followers",
+            "subscriber", "subscribers", "channel", "profile", "page",
+            "account", "handle", "username", "link", "website", "web",
+            "site", "online", "internet", "net", "whatsapp channel",
+            "telegram", "tiktok", "snapchat", "pinterest"
+        ]
+
+        if any(k in msg_lower for k in social_media_keywords):
+            return None
+
+        # --------------------------------------------------
+        # 2️⃣ PRICE / PACKAGE / ARTIST QUESTIONS
+        # --------------------------------------------------
+        price_keywords = [
+            "price", "cost", "charges", "fee", "rate",
+            "how much", "pricing", "budget"
+        ]
+
+        package_keywords = [
+            "package", "packages", "plan", "plans",
+            "lowest", "cheapest", "minimum", "basic",
+            "premium", "luxury", "highest", "expensive"
+        ]
+
+        artist_keywords = [
+            "senior", "junior", "artist", "makeup artist",
+            "reception", "engagement", "cocktail"
+        ]
+
+        if any(k in msg_lower for k in price_keywords + package_keywords + artist_keywords):
+
+            if "reception" in msg_lower:
+                return self.prompt_templates.get_service_price_info(
+                    "Reception",
+                    language
+                )
+
+            if "senior" in msg_lower:
+                return self.prompt_templates.get_service_price_info(
+                    "Senior Artist",
+                    language
+                )
+
+            if "cheapest" in msg_lower or "lowest" in msg_lower:
+                return self.prompt_templates.get_lowest_price_package(language)
+
+            if "premium" in msg_lower or "luxury" in msg_lower:
+                return self.prompt_templates.get_premium_package(language)
+
+            if memory.intent.service:
+                return self.prompt_templates.get_service_price_info(
+                    memory.intent.service,
+                    language
+                )
+
+            return self.prompt_templates.get_service_details(language)
+
+        # --------------------------------------------------
+        # 3️⃣ LIST / OFFERING QUESTIONS
+        # --------------------------------------------------
+        list_keywords = [
+            "list", "services", "what do you offer",
+            "what services", "what are your services",
+            "show services", "available services",
+            "explain services", "service details"
+        ]
+
+        if any(k in msg_lower for k in list_keywords):
+            return self.prompt_templates.get_service_details(language)
+
+        # --------------------------------------------------
+        # 4️⃣ SERVICE COMPARISON FLOW
+        # --------------------------------------------------
+        comparison_state = memory.intent.metadata.get(
+            "service_comparison", {}
+        )
+
+        if comparison_state.get("waiting_for_response", False):
+            return await self._handle_service_switch_response(
+                message,
+                memory,
+                language
+            )
+
+        # --------------------------------------------------
+        # 5️⃣ NOT HANDLED HERE → fallback
+        # --------------------------------------------------
+        return None
+
+
+    async def _handle_service_comparison(self, message: str, requested_service: str, memory: ConversationMemory, language: str) -> Dict[str, Any]:
+        """Handle when user asks about different service"""
+        logger.info(f"🔍 User asking about different service: {requested_service}")
+        
+        # Answer the question about that service
+        context = f"User is currently selecting package for {memory.intent.service}. They are asking about {requested_service}."
+        answer = await self.knowledge_base_service.get_answer(message, language, context)
+        
+        if not answer:
+            # Fallback answer
+            answer = f"For detailed information about {requested_service}, you can select it from our services list."
+        
+        # Show comparison: Current service vs Asked service
+        if memory.intent.service:
+            current_service_info = self.prompt_templates.get_service_price_info(memory.intent.service, language)
+            asked_service_info = self.prompt_templates.get_service_price_info(requested_service, language)
+            
+            reply = f"{answer}\n\n🎯 **Comparison:**\n\n"
+            reply += f"**Current Selection:** {memory.intent.service}\n{current_service_info}\n\n"
+            reply += f"**{requested_service}:**\n{asked_service_info}\n\n"
+            
+            # Ask if they want to switch services
+            if language == "hi":
+                reply += "क्या आप इस सेवा को चुनना चाहेंगे? (हां/नहीं)"
+            elif language == "ne":
+                reply += "के तपाईं यो सेवा छनोट गर्न चाहनुहुन्छ? (हो/होइन)"
+            elif language == "mr":
+                reply += "तुम्हाला ही सेवा निवडायची आहे का? (हो/नाही)"
+            else:
+                reply += "Would you like to select this service instead? (yes/no)"
+            
+            # Set a flag to handle service switching
+            memory.intent.metadata['service_comparison'] = {
+                'requested_service': requested_service,
+                'waiting_for_response': True
+            }
+            
+            memory.add_message("assistant", reply)
+            self.memory_service.update_session(memory.session_id, memory)
+            
+            return self._build_response(
+                reply=reply,
+                memory=memory,
+                action="service_comparison",
+                metadata={
+                    "current_service": memory.intent.service,
+                    "requested_service": requested_service,
+                    "off_track_count": memory.off_track_count
+                }
+            )
+
+    async def _handle_service_switch_response(self, message: str, memory: ConversationMemory, language: str) -> Optional[str]:
+        """Handle user's response to service switch question"""
+        msg_lower = message.lower()
+        
+        if 'yes' in msg_lower or 'हां' in msg_lower or 'हो' in msg_lower:
+            # User wants to switch services
+            requested_service = memory.intent.metadata['service_comparison']['requested_service']
+            previous_service = memory.intent.service
+            memory.intent.service = requested_service
+            memory.intent.package = None  # Reset package selection
+            memory.intent.metadata.pop('service_comparison', None)
+            
+            logger.info(f"🔄 User switched service from {previous_service} to {requested_service}")
+            
+            # Move to package selection for new service
+            memory.stage = BookingState.SELECTING_PACKAGE.value
+            
+            reply = f"✅ **Switched to {requested_service}**\n\n"
+            reply += self.fsm._get_package_prompt(requested_service, language)
+            
+            memory.add_message("assistant", reply)
+            self.memory_service.update_session(memory.session_id, memory)
+            
+            # This returns None because we're handling it directly
+            return None
+        
+        elif 'no' in msg_lower or 'नहीं' in msg_lower or 'होइन' in msg_lower:
+            # User doesn't want to switch, clear comparison flag
+            memory.intent.metadata.pop('service_comparison', None)
+            return "Okay, let's continue with your current selection."
+        
+        return None
+
+    async def _show_answer_with_continuation(self, answer: str, original_question: str, memory: ConversationMemory, language: str) -> Dict[str, Any]:
+        """Show answer and appropriate booking continuation"""
+        # Get current state and missing fields
+        state_enum = BookingState.from_string(memory.stage)
+        missing = memory.intent.missing_fields()
+        
+        # Get appropriate continuation based on state
+        continuation = ""
+        
+        if state_enum == BookingState.CONFIRMING:
+            summary = memory.intent.get_summary()
+            continuation = self.prompt_templates.get_confirmation_prompt(summary, language)
+        
+        elif state_enum == BookingState.COLLECTING_DETAILS and missing:
+            continuation = self.fsm._get_collected_summary_prompt(memory.intent, missing, language)
+        
+        elif state_enum == BookingState.SELECTING_PACKAGE and memory.intent.service:
+            continuation = self.fsm._get_package_prompt(memory.intent.service, language)
+        
+        else:
+            try:
+                continuation = self._get_booking_continuation(state_enum, memory, language)
+            except AttributeError as e:
+                logger.error(f"Error getting booking continuation: {e}")
+                continuation = "How can I help you with your booking?"
+        
+        # Format final reply
+        if answer and continuation:
+            reply = f"{answer}\n\n{continuation}"
+        elif answer:
+            reply = answer
+        else:
+            reply = continuation
+        
+        memory.add_message("assistant", reply)
+        self.memory_service.update_session(memory.session_id, memory)
+        
+        return self._build_response(
+            reply=reply,
+            memory=memory,
+            action="question_answered",
+            metadata={
+                "question": original_question,
+                "answer": answer,
+                "off_track_count": memory.off_track_count,
+                "max_attempts": self.MAX_OFF_TRACK_ATTEMPTS
+            }
+        )
+
+    def _get_generic_fallback_answer(self, message: str, language: str) -> str:
+        """Get generic fallback answer when knowledge base has no answer"""
+        # VERY generic fallback - no specific content
+        if language == "hi":
+            return "मैं आपकी जानकारी के लिए यहां हूं। आपकी बुकिंग जारी रखें।"
+        elif language == "ne":
+            return "म तपाईंको जानकारीको लागि यहाँ छु। तपाईंको बुकिङ जारी राख्नुहोस्।"
+        elif language == "mr":
+            return "मी तुमच्या माहितीसाठी इथे आहे. तुमची बुकिंग सुरू ठेवा."
+        else:
+            return "I'm here for your information. Please continue with your booking."
+
+    async def _handle_question_error(self, memory: ConversationMemory, language: str, error: Exception) -> Dict[str, Any]:
+        """Handle errors in question answering"""
+        logger.error(f"Question answering error: {error}")
+        
+        # Fallback: just continue with booking
+        state_enum = BookingState.from_string(memory.stage)
+        try:
+            continuation = self._get_booking_continuation(state_enum, memory, language)
+        except AttributeError:
+            if language == "hi":
+                continuation = "बुकिंग जारी रखें।"
+            elif language == "ne":
+                continuation = "बुकिङ जारी राख्नुहोस्।"
+            else:
+                continuation = "Continue with booking."
+        
+        reply = f"I understand. {continuation}"
+        memory.add_message("assistant", reply)
+        self.memory_service.update_session(memory.session_id, memory)
+        
+        return self._build_response(
+            reply=reply,
+            memory=memory,
+            action="continue",
+            metadata={"error": str(error)}
+        )
+
+
+    async def _handle_year_response(self, message: str, memory: ConversationMemory, language: str) -> Dict[str, Any]:
+        """Handle year response for partial dates"""
+        year_match = re.search(r'\b(20[2-9][0-9]|2100)\b', message)
+        
+        if year_match:
+            year = int(year_match.group(1))
+            # Update date with year
+            date_info = memory.intent.metadata.get('date_info', {})
+            
+            if date_info.get('needs_year', False) and memory.intent.date:
+                try:
+                    from datetime import datetime
+                    old_date = datetime.strptime(memory.intent.date, '%Y-%m-%d')
+                    new_date = old_date.replace(year=year)
+                    memory.intent.date = new_date.strftime('%Y-%m-%d')
+                    
+                    # Update metadata
+                    memory.intent.metadata['date_info']['needs_year'] = False
+                    memory.intent.metadata['date_info']['user_provided_year'] = year
+                    
+                    # Show updated summary
+                    missing = memory.intent.missing_fields()
+                    continuation = self.fsm._get_collected_summary_prompt(memory.intent, missing, language)
+                    
+                    reply = f"✅ Updated year to {year}. {continuation}"
+                    memory.add_message("assistant", reply)
+                    self.memory_service.update_session(memory.session_id, memory)
+                    
+                    return self._build_response(
+                        reply=reply,
+                        memory=memory,
+                        action="year_provided",
+                        metadata={"year": year}
+                    )
+                except Exception as e:
+                    logger.error(f"Error updating year: {e}")
+        
+        # If no valid year, ask again
+        date_original = memory.intent.metadata.get('date_info', {}).get('original', 'the date')
+        
+        if language == "hi":
+            reply = f"📅 **आपने तारीख दी: '{date_original}' लेकिन साल नहीं दिया। कृपया साल दें (जैसे 2025, 2026):**"
+        elif language == "ne":
+            reply = f"📅 **तपाईंले मिति दिनुभयो: '{date_original}' तर वर्ष दिनुभएन। कृपया वर्ष दिनुहोस् (जस्तै 2025, 2026):**"
+        elif language == "mr":
+            reply = f"📅 **तुम्ही तारीख दिली: '{date_original}' पण वर्ष दिले नाही. कृपया वर्ष द्या (उदा. 2025, 2026):**"
+        else:
+            reply = f"📅 **You provided date: '{date_original}' but not the year. Please provide the year (e.g., 2025, 2026):**"
+        
+        memory.add_message("assistant", reply)
+        self.memory_service.update_session(memory.session_id, memory)
+        
+        return self._build_response(
+            reply=reply,
+            memory=memory,
+            action="ask_year",
+            metadata={"error": "Invalid year provided"}
+        )
+
+
+
+
+
 
     def _get_booking_continuation(self, state_enum: BookingState, memory: ConversationMemory, language: str) -> str:
-        """Get the next step to continue booking"""
+        """Get the next step to continue booking - FIXED"""
         
         if state_enum == BookingState.GREETING:
             return self.prompt_templates.get_service_list(language)
         
         elif state_enum == BookingState.SELECTING_SERVICE:
             return self.prompt_templates.get_service_list(language)
+
+        elif state_enum == BookingState.INFO_MODE:
+            # In info mode, just acknowledge we're in chat mode
+            if language == "hi":
+                return "मैं सूचना मोड में हूं। आप मुझसे कुछ भी पूछ सकते हैं।"
+            elif language == "ne":
+                return "म जानकारी मोडमा छु। तपाईं मसँग केहि पनि सोध्न सक्नुहुन्छ।"
+            else:
+                return "I'm in information mode. You can ask me anything."
         
         elif state_enum == BookingState.SELECTING_PACKAGE:
             if memory.intent.service:
+                # FIX: Show packages for the CURRENT service, not what was just discussed
                 return self.fsm._get_package_prompt(memory.intent.service, language)
             else:
                 return self.prompt_templates.get_service_list(language)
@@ -534,6 +942,8 @@ What are your details?"""
             memory = self.memory_service.get_session(session_id)
             if memory:
                 return memory
+        
+        # Create new session if not found
         new_session_id = self.memory_service.create_session(language)
         return self.memory_service.get_session(new_session_id)
     
@@ -556,16 +966,27 @@ What are your details?"""
         return any(kw in msg_lower for kw in keywords)
     
     async def _switch_to_chat_mode(self, memory: ConversationMemory, language: str) -> Dict[str, Any]:
-        """Switch to chat mode"""
+        """Switch to chat mode - FIXED to properly set stage to INFO_MODE"""
         memory.reset()
-        memory.stage = "chat_mode"
+        memory.stage = BookingState.INFO_MODE.value  # Use INFO_MODE instead of "chat_mode"
         self.memory_service.update_session(memory.session_id, memory)
         
-        reply = "I notice you have questions. Feel free to ask, and when ready to book, let me know!"
+        if language == "hi":
+            reply = "मैंने सूचना मोड में स्विच कर दिया है। आप स्वतंत्र रूप से पूछ सकते हैं, और जब बुकिंग करने के लिए तैयार हों, तो मुझे बताएं!"
+        elif language == "ne":
+            reply = "मैले जानकारी मोडमा स्विच गरेको छु। तपाईं स्वतन्त्र रूपमा सोध्न सक्नुहुन्छ, र जब बुकिङ गर्न तयार हुनुहुन्छ, मलाई भन्नुहोस्!"
+        else:
+            reply = "I've switched to information mode. Feel free to ask any questions, and when you're ready to book, let me know!"
+        
         memory.add_message("assistant", reply)
         self.memory_service.update_session(memory.session_id, memory)
         
-        return self._build_response(reply, memory, "switched_to_chat", {"chat_mode": "normal"})
+        return self._build_response(
+            reply=reply, 
+            memory=memory, 
+            action="switched_to_info", 
+            metadata={"chat_mode": "normal"}
+        )
     
     async def _handle_exit(self, memory: ConversationMemory, language: str) -> Dict[str, Any]:
         """Handle exit"""
@@ -875,8 +1296,19 @@ What are your details?"""
             )
     
     def _build_response(self, reply: str, memory: ConversationMemory, action: str, metadata: Dict = None) -> Dict[str, Any]:
-        """Build response"""
+        """Build response - FIXED chat_mode determination based on stage"""
         metadata = metadata or {}
+        
+        # Determine chat_mode based on stage
+        state_enum = BookingState.from_string(memory.stage)
+        if state_enum in [BookingState.GREETING, BookingState.INFO_MODE]:
+            chat_mode = "normal"
+        else:
+            chat_mode = "agent"
+        
+        # Override with metadata if explicitly provided
+        if "chat_mode" in metadata:
+            chat_mode = metadata["chat_mode"]
         
         response_data = {
             "reply": reply,
@@ -885,7 +1317,7 @@ What are your details?"""
             "action": action,
             "missing_fields": memory.intent.missing_fields(),
             "collected_info": memory.intent.get_summary(),
-            "chat_mode": metadata.get("chat_mode", "agent"),
+            "chat_mode": chat_mode,  # Use the determined value
             "next_expected": metadata.get("next_expected"),
             "booking_id": metadata.get("booking_id"),
             "off_track_count": memory.off_track_count

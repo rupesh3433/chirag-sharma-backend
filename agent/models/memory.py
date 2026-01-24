@@ -116,3 +116,94 @@ class ConversationMemory(BaseModel):
             if msg.get("role") == "user"
         ]
         return user_messages[-count:] if user_messages else []
+    
+    def get_last_assistant_message(self) -> Optional[str]:
+        """Get the last assistant message from conversation history"""
+        if not self.conversation_history:
+            return None
+        
+        # Reverse search for last assistant message
+        for msg in reversed(self.conversation_history):
+            if msg.get("role") == "assistant":
+                return msg.get("content", "")
+        return None
+    
+    def get_last_user_message(self) -> Optional[str]:
+        """Get the last user message from conversation history"""
+        if not self.conversation_history:
+            return None
+        
+        # Reverse search for last user message
+        for msg in reversed(self.conversation_history):
+            if msg.get("role") == "user":
+                return msg.get("content", "")
+        return None
+    
+    def get_last_n_assistant_messages(self, n: int = 3) -> List[str]:
+        """Get last n assistant messages"""
+        if not self.conversation_history:
+            return []
+        
+        assistant_messages = [
+            msg.get("content", "") for msg in reversed(self.conversation_history)
+            if msg.get("role") == "assistant"
+        ]
+        return assistant_messages[:n]
+    
+    def get_last_n_user_messages(self, n: int = 3) -> List[str]:
+        """Get last n user messages"""
+        if not self.conversation_history:
+            return []
+        
+        user_messages = [
+            msg.get("content", "") for msg in reversed(self.conversation_history)
+            if msg.get("role") == "user"
+        ]
+        return user_messages[:n]
+    
+    def has_recent_service_listing(self) -> bool:
+        """Check if we recently showed service listing"""
+        last_assistant_msg = self.get_last_assistant_message()
+        if not last_assistant_msg:
+            return False
+        
+        # Check if the last assistant message contains service listing keywords
+        keywords = ['services', 'service', 'available services', 'bridal', 'party', 'engagement', 'henna']
+        return any(keyword.lower() in last_assistant_msg.lower() for keyword in keywords)
+    
+    def is_in_chat_mode(self) -> bool:
+        """Check if we're in chat mode"""
+        return self.stage == "chat_mode"
+    
+    def get_conversation_summary(self, max_messages: int = 10) -> str:
+        """Get summary of conversation for context"""
+        if not self.conversation_history:
+            return "No conversation yet."
+        
+        # Get the most recent messages up to max_messages
+        recent = self.conversation_history[-max_messages:]
+        
+        summary_lines = []
+        for msg in recent:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            # Truncate very long messages
+            if len(content) > 100:
+                content = content[:100] + "..."
+            summary_lines.append(f"{role}: {content}")
+        
+        # Add current state
+        summary_lines.append(f"\nCurrent stage: {self.stage}")
+        summary_lines.append(f"Service: {self.intent.service or 'Not selected'}")
+        summary_lines.append(f"Package: {self.intent.package or 'Not selected'}")
+        summary_lines.append(f"Off-track count: {self.off_track_count}")
+        
+        return "\n".join(summary_lines)
+    
+    def get_messages_by_role(self, role: str, max_count: int = 5) -> List[str]:
+        """Get messages by specific role"""
+        messages = [
+            msg.get("content", "") for msg in self.conversation_history
+            if msg.get("role") == role
+        ]
+        return messages[-max_count:] if messages else []

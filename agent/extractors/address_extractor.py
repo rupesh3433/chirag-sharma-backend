@@ -324,40 +324,116 @@ class AddressExtractor(BaseExtractor):
         return ', '.join(formatted_parts)
     
     def _validate_address(self, address: str) -> bool:
-        """Validate if string is likely an address"""
-        if not address or len(address) < 10:
+        """Validate if string is likely an address - RELAXED for city names"""
+        if not address or len(address) < 3:  # Reduced from 10 to 3
             return False
         
-        # Check for minimum components (at least 2 parts separated by comma)
-        parts = [p.strip() for p in address.split(',')]
-        if len(parts) < 1:
-            return False
-        
-        # Check if it's not just a single word
-        words = address.split()
-        if len(words) < 2:
-            return False
-        
-        # Check if it contains at least one indicator or location
-        has_indicator = False
         addr_lower = address.lower()
         
-        for indicator in self.ADDRESS_INDICATORS[:30]:  # Check first 30 indicators
+        # ========================
+        # EXCLUDE DATE PATTERNS
+        # ========================
+        # Month names (English)
+        months = [
+            'january', 'february', 'march', 'april', 'may', 'june',
+            'july', 'august', 'september', 'october', 'november', 'december',
+            'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'
+        ]
+        
+        # Common date patterns
+        date_patterns = [
+            r'\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
+            r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}',
+            r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}',
+            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',
+            r'\d{1,2}\s+\d{4}'  # "15 2025"
+        ]
+        
+        # Check for date patterns
+        for month in months:
+            if month in addr_lower:
+                # Check if it's a date format
+                for pattern in date_patterns:
+                    if re.search(pattern, addr_lower):
+                        return False
+        
+        # Check for question patterns
+        question_starters = [
+            "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+            "can you", "could you", "would you", "will you",
+            "tell me", "show me", "give me", "explain this",
+            "i want to know", "i would like to know",
+            "do you have", "do you offer", "do you provide",
+        ]
+        
+        for starter in question_starters:
+            if addr_lower.startswith(starter):
+                return False
+        
+        # Check for social media patterns
+        social_patterns = [
+            'instagram', 'facebook', 'twitter', 'youtube', 'linkedin',
+            'social media', 'follow', 'subscribe', 'channel',
+            'link', 'website', 'web', 'site', 'online'
+        ]
+        
+        for pattern in social_patterns:
+            if pattern in addr_lower:
+                return False
+        
+        # ========================
+        # NEW: Special handling for city names
+        # ========================
+        # Check if it's a known city
+        is_city = any(location in addr_lower for location in self.LOCATION_NAMES)
+        
+        if is_city:
+            # For city names only, be more lenient
+            # Check it's not just part of a longer invalid string
+            words = address.split()
+            if len(words) == 1:
+                # Single word that's a city - accept it
+                return True
+            elif len(words) <= 3:
+                # Short address (like "Delhi", "New Delhi", "South Delhi")
+                # Check if it doesn't contain other invalid patterns
+                invalid_patterns = [
+                    r'\d{10}',  # Phone number
+                    r'\S+@\S+\.\S+',  # Email
+                    r'price|cost|how much|fee',  # Price keywords
+                ]
+                for pattern in invalid_patterns:
+                    if re.search(pattern, addr_lower):
+                        return False
+                return True
+        
+        # ========================
+        # For non-city addresses, apply stricter rules
+        # ========================
+        parts = [p.strip() for p in address.split(',')]
+        
+        # Check for address indicators
+        has_indicator = False
+        for indicator in self.ADDRESS_INDICATORS[:30]:
             if indicator in addr_lower:
                 has_indicator = True
                 break
         
         if not has_indicator:
-            # Check for location names
-            for location in self.LOCATION_NAMES[:50]:  # Check major locations
-                if location in addr_lower:
-                    has_indicator = True
-                    break
+            # Check for location names (already done above)
+            if not is_city:
+                return False
         
-        # If no indicator, check if it has address-like structure
-        if not has_indicator:
-            # Check for number + text pattern
+        # Check for reasonable length and content
+        words = address.split()
+        if len(words) < 1:  # Reduced from 3
+            return False
+        
+        # Check for number + street pattern
+        if not is_city and not has_indicator:
             if re.search(r'\d+[,\s]+\w+', address):
                 has_indicator = True
+            else:
+                return False
         
-        return has_indicator
+        return True
