@@ -260,17 +260,7 @@ class BookingFSM:
         """Handle details collection state - FIXED to show collected info and ask for remaining"""
         msg_lower = message.lower().strip()
         
-        # Check if it's a question (like "what is your instagram link?")
-        if self._is_question_general(msg_lower):
-            logger.info(f"ℹ️ Detected question during details: {message[:50]}")
-            return (BookingState.COLLECTING_DETAILS.value, intent, {
-                "action": "question_during_details",
-                "message": "",  # Will be handled by knowledge base
-                "mode": "booking",
-                "understood": False  # Let knowledge base handle
-            })
-        
-        # Check for completion intent
+        # Check if it's a completion intent FIRST
         if self._is_completion_intent(msg_lower):
             logger.info(f"ℹ️ User wants to complete: {message}")
             if intent.is_complete():
@@ -291,7 +281,7 @@ class BookingFSM:
                     "understood": True
                 })
         
-        # Try to extract fields from the message
+        # Try to extract fields from the message FIRST (before checking for questions)
         extracted = self._extract_all_fields(message, intent, history)
         logger.info(f"ℹ️ Extracted fields from message: {extracted}")
         
@@ -361,6 +351,17 @@ class BookingFSM:
                     "mode": "booking",
                     "understood": True
                 })
+        
+        # Check if it's a question (like "what is your instagram link?")
+        # Only do this AFTER trying to extract fields
+        if self._is_question_general(msg_lower):
+            logger.info(f"ℹ️ Detected question during details: {message[:50]}")
+            return (BookingState.COLLECTING_DETAILS.value, intent, {
+                "action": "question_during_details",
+                "message": "",  # Will be handled by knowledge base
+                "mode": "booking",
+                "understood": False  # Let knowledge base handle
+            })
         
         # If no fields extracted and it's not a question, check if it's a complaint
         # like "i already gave you my name"
@@ -611,19 +612,70 @@ class BookingFSM:
         return any(qw in msg_lower for qw in question_words)
     
     def _is_question_general(self, message: str) -> bool:
-        """Check if message is a general question"""
-        # First check if it's a single number (likely package selection)
+        """Check if message is a general question - FIXED to not treat details as questions"""
+        msg_lower = message.lower().strip()
+        
+        # First, check if this looks like a details response (has comma-separated values)
+        # If it has multiple parts separated by commas, it's likely details, not a question
+        if ',' in message and len(message.split(',')) >= 3:
+            return False
+        
+        # Check if it contains typical booking details patterns
+        details_patterns = [
+            r'\+?\d[\d\s\-\(\)]{8,}\d',  # Phone number pattern
+            r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',  # Email pattern
+            r'\b\d{1,2}(?:st|nd|rd|th)?\s+[a-z]{3,}',  # Date pattern like "25th june"
+            r'\b[a-z]{3,}\s+\d{1,2}(?:st|nd|rd|th)?',  # Date pattern like "june 25th"
+            r'\b\d{4,6}\b',  # PIN code pattern
+            r'\b(india|nepal|pakistan|bangladesh|dubai)\b',  # Country names
+        ]
+        
+        for pattern in details_patterns:
+            if re.search(pattern, msg_lower):
+                return False
+        
+        # Check for single number (likely package selection)
         if re.match(r'^\s*\d+\s*$', message):
             return False
         
-        question_words = ['what', 'which', 'how', 'why', 'when', 'where', 'who',
-                         'tell me', 'show me', 'list', 'can you', 'could you',
-                         'what is', 'what are', 'how to', 'how do', 'how can',
-                         'instagram', 'facebook', 'social media', 'contact', 'email',
-                         'phone', 'number', 'link', 'website', 'youtube', 'details',
-                         'information', 'about', 'price', 'cost', 'charge', 'hi', 'hello']
-        msg_lower = message.lower()
-        return any(qw in msg_lower for qw in question_words)
+        # Check for completion intent words
+        completion_words = ['done', 'finish', 'complete', 'proceed', 'confirm', 
+                          'go ahead', 'all set', 'ready', 'submit', 'ok', 'yes', 'no']
+        if any(word in msg_lower for word in completion_words):
+            return False
+        
+        # Now check for actual question words
+        question_words = [
+            'what is', 'what are', 'how to', 'how do', 'how can',
+            'can you', 'could you', 'would you', 'will you',
+            'tell me', 'show me', 'explain', 'describe',
+            'where is', 'when is', 'who is', 'why is',
+            'instagram', 'facebook', 'social media', 'youtube',
+            'link', 'website', 'contact', 'about',
+            'price', 'cost', 'charge', 'rate', 'fee',
+            'hi ', 'hello ', 'hey ',  # Only if at start
+        ]
+        
+        # Check if message starts with question words
+        for qw in question_words:
+            if msg_lower.startswith(qw):
+                return True
+        
+        # Check for question mark
+        if '?' in message:
+            return True
+        
+        # Check for question words anywhere (but not if it's part of a larger detail)
+        question_indicator_words = ['what', 'which', 'how', 'why', 'when', 'where', 'who']
+        for word in question_indicator_words:
+            if word in msg_lower:
+                # Check if it's a standalone word or part of something else
+                if re.search(rf'\b{word}\b', msg_lower):
+                    # Check if it's in a phrase that indicates a question
+                    if any(phrase in msg_lower for phrase in [f'{word} is', f'{word} are', f'{word} do', f'{word} can']):
+                        return True
+        
+        return False
     
     def _is_completion_intent(self, message: str) -> bool:
         """Check if user wants to complete details"""
@@ -694,6 +746,19 @@ class BookingFSM:
         if not hasattr(intent, 'metadata') or intent.metadata is None:
             intent.metadata = {}
         
+        # DEBUG: Log what we're trying to extract
+        logger.info(f"🔍 Extracting fields from: {message}")
+        
+        # Extract pincode FIRST (before other fields might interfere)
+        if not intent.pincode:
+            logger.info(f"🔍 Looking for pincode in: {message}")
+            pincode_data = self.pincode_extractor.extract(message)
+            if pincode_data:
+                extracted["pincode"] = pincode_data.get("pincode")
+                logger.info(f"✅ Found pincode: {pincode_data.get('pincode')}")
+            else:
+                logger.warning(f"❌ No pincode extracted from: {message}")
+        
         # Extract date (only if not already collected)
         if not intent.date:
             date_data = self.date_extractor.extract(message)
@@ -708,43 +773,44 @@ class BookingFSM:
                     'original': date_data.get('original', ''),
                     'confidence': date_data.get('confidence', 'medium')
                 }
+                logger.info(f"✅ Found date: {date_data.get('date')}")
         
         # Extract name (only if not already collected)
         if not intent.name:
             name_data = self.name_extractor.extract(message)
             if name_data and name_data.get("name"):
                 extracted["name"] = name_data.get("name")
+                logger.info(f"✅ Found name: {name_data.get('name')}")
         
         # Extract phone (only if not already collected)
         if not intent.phone:
             phone_data = self.phone_extractor.extract(message)
             if phone_data:
                 extracted["phone"] = phone_data
+                logger.info(f"✅ Found phone: {phone_data}")
         
         # Extract email (only if not already collected)
         if not intent.email:
             email_data = self.email_extractor.extract(message)
             if email_data:
                 extracted["email"] = email_data.get("email")
+                logger.info(f"✅ Found email: {email_data.get('email')}")
         
         # Extract address (only if not already collected)
         if not intent.address:
             address_data = self.address_extractor.extract(message)
             if address_data:
                 extracted["address"] = address_data.get("address")
-        
-        # Extract pincode (only if not already collected)
-        if not intent.pincode:
-            pincode_data = self.pincode_extractor.extract(message)
-            if pincode_data:
-                extracted["pincode"] = pincode_data.get("pincode")
+                logger.info(f"✅ Found address: {address_data.get('address')}")
         
         # Extract country (only if not already collected)
         if not intent.service_country:
             country_data = self.country_extractor.extract(message)
             if country_data:
                 extracted["country"] = country_data.get("country")
+                logger.info(f"✅ Found country: {country_data.get('country')}")
         
+        logger.info(f"📦 Final extracted fields: {extracted}")
         return extracted
     
     def _extract_year_from_message(self, message: str) -> Optional[int]:

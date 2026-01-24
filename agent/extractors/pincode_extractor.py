@@ -137,7 +137,7 @@ class PincodeExtractor(BaseExtractor):
         return None
     
     def _find_pincode_patterns(self, message: str) -> List[str]:
-        """Find all potential pincode patterns in message"""
+        """Find all potential pincode patterns in message - FIXED"""
         candidates = []
         
         # Pattern 1: 4-6 digit numbers
@@ -156,31 +156,38 @@ class PincodeExtractor(BaseExtractor):
                 except ValueError:
                     pass
             
-            # Skip if it's part of a date pattern
-            # Check context around the number
-            start_pos = match.start()
-            end_pos = match.end()
+            # Skip if it's part of a phone number
+            if self._looks_like_phone(number, message):
+                continue
             
-            # Get context (20 chars before and after)
-            context_start = max(0, start_pos - 20)
-            context_end = min(len(message), end_pos + 20)
-            context = message[context_start:context_end].lower()
+            # Don't skip based on date context for 5-6 digit numbers
+            # Only check for date context for 4-digit numbers that passed year check
+            if len(number) == 4:
+                # Get context (20 chars before and after)
+                start_pos = match.start()
+                end_pos = match.end()
+                
+                context_start = max(0, start_pos - 20)
+                context_end = min(len(message), end_pos + 20)
+                context = message[context_start:context_end].lower()
+                
+                # Check for date indicators near the number
+                date_indicators = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                                'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+                                'month', 'day', 'date', 'st', 'nd', 'rd', 'th']
+                
+                # Check if any date indicator is in context
+                is_likely_date = any(indicator in context for indicator in date_indicators)
+                
+                # Check for date patterns like dd/mm or mm/dd
+                has_date_pattern = re.search(r'\d{1,2}[-/]\d{1,2}', context) is not None
+                
+                if is_likely_date or has_date_pattern:
+                    continue
             
-            # Check for date indicators near the number
-            date_indicators = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
-                            'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
-                            'month', 'day', 'date', 'st', 'nd', 'rd', 'th']
-            
-            # Check if any date indicator is in context
-            is_likely_date = any(indicator in context for indicator in date_indicators)
-            
-            # Check for date patterns like dd/mm or mm/dd
-            has_date_pattern = re.search(r'\d{1,2}[-/]\d{1,2}', context) is not None
-            
-            if not (is_likely_date or has_date_pattern):
-                # Additional validation
-                if self._is_valid_pincode_length(number):
-                    candidates.append(number)
+            # For 5-6 digit numbers, always consider them as potential pincodes
+            if self._is_valid_pincode_length(number):
+                candidates.append(number)
         
         return candidates
     
@@ -233,31 +240,40 @@ class PincodeExtractor(BaseExtractor):
         return None
     
     def _looks_like_phone(self, number: str, message: str) -> bool:
-        """Check if number looks like a phone number"""
+        """Check if number looks like a phone number - FIXED"""
         # Find the number's position in message
         try:
             pos = message.index(number)
         except ValueError:
             return False
         
-        # Check context around the number
-        context_before = message[max(0, pos-10):pos].lower()
-        context_after = message[pos+len(number):pos+len(number)+10].lower()
+        # Check context around the number (extended context)
+        context_before = message[max(0, pos-15):pos].lower()
+        context_after = message[pos+len(number):pos+len(number)+15].lower()
         
-        # Phone indicators
-        phone_indicators = ['phone', 'whatsapp', 'mobile', 'contact', 'number', '+', 'call']
+        # Phone indicators - more specific
+        phone_indicators = [
+            'phone', 'whatsapp', 'mobile', 'contact', 'call',
+            'number:', 'no:', 'ph:', 'tel:', 'mob:',
+            'फ़ोन', 'मोबाइल', 'नंबर', 'व्हाट्सएप'
+        ]
         
+        # Check if preceded by explicit phone indicators
         for indicator in phone_indicators:
             if indicator in context_before or indicator in context_after:
                 return True
         
-        # Check if preceded by +
-        if context_before.strip().endswith('+'):
+        # Check if it's preceded by + (country code)
+        if '+' in context_before[-5:]:  # Check last 5 chars before the number
             return True
         
-        # Check if it's a 10-digit number (likely phone)
+        # Check if it's a 10-digit number AND near common phone contexts
         if len(number) == 10:
-            return True
+            # Additional check: is it near common phone patterns?
+            phone_contexts = ['91', '977', '92', '880']  # Common country codes
+            for code in phone_contexts:
+                if code in context_before:
+                    return True
         
         return False
     
