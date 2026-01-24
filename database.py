@@ -35,6 +35,10 @@ def create_indexes():
     knowledge_collection.create_index("language")
     knowledge_collection.create_index("is_active")
     knowledge_collection.create_index("created_at")
+    knowledge_collection.create_index([("language", 1), ("is_active", 1)])
+    knowledge_collection.create_index([("language", 1), ("category", 1), ("is_active", 1)])
+
+    print(f"Database connected: {MONGO_URI}")
 
 # Initialize indexes on module import
 create_indexes()

@@ -1,1118 +1,1118 @@
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr, validator
-from typing import List, Optional
-import os
-import requests
-import logging
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from random import randint
-import secrets
-import jwt
-import bcrypt
-import re
+# from fastapi import FastAPI, HTTPException, Depends, status
+# from fastapi.middleware.cors import CORSMiddleware
+# from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+# from pydantic import BaseModel, EmailStr, validator
+# from typing import List, Optional
+# import os
+# import requests
+# import logging
+# from dotenv import load_dotenv
+# from datetime import datetime, timedelta
+# from random import randint
+# import secrets
+# import jwt
+# import bcrypt
+# import re
 
-from pymongo import MongoClient
-from bson import ObjectId
-from twilio.rest import Client
+# from pymongo import MongoClient
+# from bson import ObjectId
+# from twilio.rest import Client
 
-# ----------------------
-# Basic Logging
-# ----------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# # ----------------------
+# # Basic Logging
+# # ----------------------
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
 
-# ----------------------
-# Load Environment
-# ----------------------
-load_dotenv()
+# # ----------------------
+# # Load Environment
+# # ----------------------
+# load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI")
-JWT_SECRET = os.getenv("JWT_SECRET", "your-super-secret-jwt-key-change-this")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
+# GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# MONGO_URI = os.getenv("MONGO_URI")
+# JWT_SECRET = os.getenv("JWT_SECRET", "your-super-secret-jwt-key-change-this")
+# JWT_ALGORITHM = "HS256"
+# JWT_EXPIRATION_HOURS = 24
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
+# TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+# TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+# TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
 
-# Email configuration for password reset
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_EMAIL = os.getenv("SMTP_EMAIL")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+# # Email configuration for password reset
+# SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+# SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+# SMTP_EMAIL = os.getenv("SMTP_EMAIL")
+# SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
-# Brevo API (for environments that block SMTP)
-BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+# # Brevo API (for environments that block SMTP)
+# BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
-# Frontend URL for Admin-Panel
-FRONTEND_URL = os.getenv("FRONTEND_URL")
+# # Frontend URL for Admin-Panel
+# FRONTEND_URL = os.getenv("FRONTEND_URL")
 
-# ----------------------
-# Permanent Admins (Auto-create on first reset)
-# ----------------------
-PERMANENT_ADMINS = {
-    "poudelrupace@gmail.com",
-    "jinni.chirag.mua101@gmail.com",
-}
+# # ----------------------
+# # Permanent Admins (Auto-create on first reset)
+# # ----------------------
+# PERMANENT_ADMINS = {
+#     "poudelrupace@gmail.com",
+#     "jinni.chirag.mua101@gmail.com",
+# }
 
-# ----------------------
-# Country Codes
-# ----------------------
-COUNTRY_CODES = {
-    "Nepal": "+977",
-    "India": "+91",
-    "Pakistan": "+92",
-    "Bangladesh": "+880",
-    "Dubai": "+971",
-}
+# # ----------------------
+# # Country Codes
+# # ----------------------
+# COUNTRY_CODES = {
+#     "Nepal": "+977",
+#     "India": "+91",
+#     "Pakistan": "+92",
+#     "Bangladesh": "+880",
+#     "Dubai": "+971",
+# }
 
-# ----------------------
-# App Setup
-# ----------------------
-app = FastAPI(title="JinniChirag Website Backend")
+# # ----------------------
+# # App Setup
+# # ----------------------
+# app = FastAPI(title="JinniChirag Website Backend")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://sharmachirag.vercel.app",
-        "https://sharmachiragadmin.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:5174",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=[
+#         "https://sharmachirag.vercel.app",
+#         "https://sharmachiragadmin.vercel.app",
+#         "http://localhost:5173",
+#         "http://localhost:5174",
+#     ],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
-# ----------------------
-# MongoDB
-# ----------------------
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["jinnichirag_db"]
-booking_collection = db["bookings"]
-admin_collection = db["admins"]
-reset_token_collection = db["reset_tokens"]
+# # ----------------------
+# # MongoDB
+# # ----------------------
+# mongo_client = MongoClient(MONGO_URI)
+# db = mongo_client["jinnichirag_db"]
+# booking_collection = db["bookings"]
+# admin_collection = db["admins"]
+# reset_token_collection = db["reset_tokens"]
 
-# ✅ NEW: Knowledge Base Collection
-knowledge_collection = db["knowledge_base"]
+# # ✅ NEW: Knowledge Base Collection
+# knowledge_collection = db["knowledge_base"]
 
-# Create indexes for better performance
-reset_token_collection.create_index("expires_at", expireAfterSeconds=0)
-admin_collection.create_index("email", unique=True)
-booking_collection.create_index("created_at")
-booking_collection.create_index("status")
+# # Create indexes for better performance
+# reset_token_collection.create_index("expires_at", expireAfterSeconds=0)
+# admin_collection.create_index("email", unique=True)
+# booking_collection.create_index("created_at")
+# booking_collection.create_index("status")
 
-# Create indexes for knowledge base
-knowledge_collection.create_index("language")
-knowledge_collection.create_index("is_active")
-knowledge_collection.create_index("created_at")
+# # Create indexes for knowledge base
+# knowledge_collection.create_index("language")
+# knowledge_collection.create_index("is_active")
+# knowledge_collection.create_index("created_at")
 
-# ----------------------
-# Twilio
-# ----------------------
-try:
-    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-except Exception as e:
-    logger.warning(f"Twilio client initialization failed: {e}")
-    twilio_client = None
+# # ----------------------
+# # Twilio
+# # ----------------------
+# try:
+#     twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# except Exception as e:
+#     logger.warning(f"Twilio client initialization failed: {e}")
+#     twilio_client = None
 
-def send_whatsapp_message(phone: str, message: str):
-    """Send WhatsApp message via Twilio"""
-    if not twilio_client:
-        logger.warning("Twilio not configured - cannot send WhatsApp message")
-        return
+# def send_whatsapp_message(phone: str, message: str):
+#     """Send WhatsApp message via Twilio"""
+#     if not twilio_client:
+#         logger.warning("Twilio not configured - cannot send WhatsApp message")
+#         return
     
-    try:
-        twilio_client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            to=f"whatsapp:{phone}",
-            body=message
-        )
-        logger.info(f"WhatsApp message sent to {phone}")
-    except Exception as e:
-        logger.error(f"WhatsApp message failed for {phone}: {e}")
+#     try:
+#         twilio_client.messages.create(
+#             from_=TWILIO_WHATSAPP_FROM,
+#             to=f"whatsapp:{phone}",
+#             body=message
+#         )
+#         logger.info(f"WhatsApp message sent to {phone}")
+#     except Exception as e:
+#         logger.error(f"WhatsApp message failed for {phone}: {e}")
 
-# ----------------------
-# Security (FIXED: auto_error=False to allow unauthenticated routes)
-# ----------------------
-security = HTTPBearer(auto_error=False)
+# # ----------------------
+# # Security (FIXED: auto_error=False to allow unauthenticated routes)
+# # ----------------------
+# security = HTTPBearer(auto_error=False)
 
-# ==========================================================
-# MODELS - PUBLIC
-# ==========================================================
+# # ==========================================================
+# # MODELS - PUBLIC
+# # ==========================================================
 
-class Message(BaseModel):
-    role: str
-    content: str
+# class Message(BaseModel):
+#     role: str
+#     content: str
 
-class ChatRequest(BaseModel):
-    messages: List[Message]
-    language: str  # en | ne | hi | mr
+# class ChatRequest(BaseModel):
+#     messages: List[Message]
+#     language: str  # en | ne | hi | mr
 
-class BookingRequest(BaseModel):
-    booking_id: Optional[str] = None
-    service: str
-    package: str
-    name: str
-    email: EmailStr
-    phone: str
-    phone_country: str
-    service_country: str
-    address: str
-    pincode: str
-    date: str
-    message: Optional[str] = None
+# class BookingRequest(BaseModel):
+#     booking_id: Optional[str] = None
+#     service: str
+#     package: str
+#     name: str
+#     email: EmailStr
+#     phone: str
+#     phone_country: str
+#     service_country: str
+#     address: str
+#     pincode: str
+#     date: str
+#     message: Optional[str] = None
 
-class OtpVerifyRequest(BaseModel):
-    booking_id: str
-    otp: str
+# class OtpVerifyRequest(BaseModel):
+#     booking_id: str
+#     otp: str
 
-# ==========================================================
-# MODELS - ADMIN ONLY
-# ==========================================================
+# # ==========================================================
+# # MODELS - ADMIN ONLY
+# # ==========================================================
 
-class AdminLoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+# class AdminLoginRequest(BaseModel):
+#     email: EmailStr
+#     password: str
 
-class AdminPasswordResetRequest(BaseModel):
-    email: EmailStr
+# class AdminPasswordResetRequest(BaseModel):
+#     email: EmailStr
 
-class AdminPasswordResetConfirm(BaseModel):
-    token: str
-    new_password: str
+# class AdminPasswordResetConfirm(BaseModel):
+#     token: str
+#     new_password: str
     
-    @validator('new_password')
-    def password_strength(cls, v):
-        if len(v) < 8:
-            raise ValueError('Password must be at least 8 characters long')
-        return v
+#     @validator('new_password')
+#     def password_strength(cls, v):
+#         if len(v) < 8:
+#             raise ValueError('Password must be at least 8 characters long')
+#         return v
 
-class BookingStatusUpdate(BaseModel):
-    status: str
+# class BookingStatusUpdate(BaseModel):
+#     status: str
     
-    @validator('status')
-    def valid_status(cls, v):
-        allowed = ['pending', 'approved', 'completed', 'cancelled']
-        if v not in allowed:
-            raise ValueError(f'Status must be one of {allowed}')
-        return v
+#     @validator('status')
+#     def valid_status(cls, v):
+#         allowed = ['pending', 'approved', 'completed', 'cancelled']
+#         if v not in allowed:
+#             raise ValueError(f'Status must be one of {allowed}')
+#         return v
 
-class BookingSearchQuery(BaseModel):
-    search: Optional[str] = None
-    status: Optional[str] = None
-    date_from: Optional[str] = None
-    date_to: Optional[str] = None
-    limit: int = 50
-    skip: int = 0
+# class BookingSearchQuery(BaseModel):
+#     search: Optional[str] = None
+#     status: Optional[str] = None
+#     date_from: Optional[str] = None
+#     date_to: Optional[str] = None
+#     limit: int = 50
+#     skip: int = 0
 
-# ==========================================================
-# MODELS - KNOWLEDGE BASE
-# ==========================================================
+# # ==========================================================
+# # MODELS - KNOWLEDGE BASE
+# # ==========================================================
 
-class KnowledgeCreate(BaseModel):
-    title: str
-    content: str
-    language: str  # en | ne | hi | mr
-    is_active: bool = True
+# class KnowledgeCreate(BaseModel):
+#     title: str
+#     content: str
+#     language: str  # en | ne | hi | mr
+#     is_active: bool = True
 
-class KnowledgeUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    language: Optional[str] = None
-    is_active: Optional[bool] = None
+# class KnowledgeUpdate(BaseModel):
+#     title: Optional[str] = None
+#     content: Optional[str] = None
+#     language: Optional[str] = None
+#     is_active: Optional[bool] = None
 
-# ==========================================================
-# UTILITY FUNCTIONS
-# ==========================================================
+# # ==========================================================
+# # UTILITY FUNCTIONS
+# # ==========================================================
 
-def hash_password(password: str) -> str:
-    """Hash password using bcrypt"""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+# def hash_password(password: str) -> str:
+#     """Hash password using bcrypt"""
+#     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-def verify_password(password: str, hashed: str) -> bool:
-    """Verify password against hash"""
-    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+# def verify_password(password: str, hashed: str) -> bool:
+#     """Verify password against hash"""
+#     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
-def create_jwt_token(email: str, role: str) -> str:
-    """Create JWT token for admin"""
-    payload = {
-        "email": email,
-        "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
-        "iat": datetime.utcnow()
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+# def create_jwt_token(email: str, role: str) -> str:
+#     """Create JWT token for admin"""
+#     payload = {
+#         "email": email,
+#         "role": role,
+#         "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+#         "iat": datetime.utcnow()
+#     }
+#     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-def verify_jwt_token(token: str) -> dict:
-    """Verify and decode JWT token"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+# def verify_jwt_token(token: str) -> dict:
+#     """Verify and decode JWT token"""
+#     try:
+#         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+#         return payload
+#     except jwt.ExpiredSignatureError:
+#         raise HTTPException(status_code=401, detail="Token has expired")
+#     except jwt.InvalidTokenError:
+#         raise HTTPException(status_code=401, detail="Invalid token")
 
-def get_current_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
-    """Dependency to get current authenticated admin"""
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+# def get_current_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
+#     """Dependency to get current authenticated admin"""
+#     if credentials is None:
+#         raise HTTPException(status_code=401, detail="Not authenticated")
     
-    token = credentials.credentials
-    payload = verify_jwt_token(token)
+#     token = credentials.credentials
+#     payload = verify_jwt_token(token)
     
-    if payload.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+#     if payload.get("role") != "admin":
+#         raise HTTPException(status_code=403, detail="Admin access required")
     
-    admin = admin_collection.find_one({"email": payload["email"]})
-    if not admin:
-        raise HTTPException(status_code=403, detail="Admin not found")
+#     admin = admin_collection.find_one({"email": payload["email"]})
+#     if not admin:
+#         raise HTTPException(status_code=403, detail="Admin not found")
     
-    return {
-        "email": admin["email"],
-        "role": admin["role"]
-    }
+#     return {
+#         "email": admin["email"],
+#         "role": admin["role"]
+#     }
 
-def send_password_reset_email(email: str, token: str):
-    """Send password reset email via Brevo API or SMTP"""
+# def send_password_reset_email(email: str, token: str):
+#     """Send password reset email via Brevo API or SMTP"""
     
-    if not FRONTEND_URL:
-        logger.error("FRONTEND_URL not configured")
-        raise Exception("FRONTEND_URL not configured")
+#     if not FRONTEND_URL:
+#         logger.error("FRONTEND_URL not configured")
+#         raise Exception("FRONTEND_URL not configured")
 
-    reset_link = f"{FRONTEND_URL}/admin/reset-password?token={token}"
+#     reset_link = f"{FRONTEND_URL}/admin/reset-password?token={token}"
     
-    # Try Brevo API first (works on Render), fallback to SMTP (for local dev)
-    if BREVO_API_KEY:
-        try:
-            response = requests.post(
-                "https://api.brevo.com/v3/smtp/email",
-                headers={
-                    "accept": "application/json",
-                    "api-key": BREVO_API_KEY,
-                    "content-type": "application/json"
-                },
-                json={
-                    "sender": {"name": "JinniChirag Admin", "email": "poudelrupace@gmail.com"},
-                    "to": [{"email": email}],
-                    "subject": "JinniChirag Admin - Password Reset",
-                    "htmlContent": f"""
-                        <html>
-                          <body>
-                            <h2>Password Reset Request</h2>
-                            <p>You requested to reset your password for JinniChirag Admin Panel.</p>
-                            <p>Click the link below to reset your password:</p>
-                            <p><a href="{reset_link}">Reset Password</a></p>
-                            <p>This link will expire in 1 hour.</p>
-                            <p>If you didn't request this, please ignore this email.</p>
-                            <br>
-                            <p>- JinniChirag Team</p>
-                          </body>
-                        </html>
-                    """
-                },
-                timeout=10
-            )
-            if response.status_code == 201:
-                logger.info(f"Password reset email sent to {email} via Brevo API")
-                return
-            else:
-                logger.error(f"Brevo API failed: {response.status_code} - {response.text}")
-                raise Exception("Brevo API failed")
-        except Exception as e:
-            logger.error(f"Brevo API error: {e}")
-            raise
+#     # Try Brevo API first (works on Render), fallback to SMTP (for local dev)
+#     if BREVO_API_KEY:
+#         try:
+#             response = requests.post(
+#                 "https://api.brevo.com/v3/smtp/email",
+#                 headers={
+#                     "accept": "application/json",
+#                     "api-key": BREVO_API_KEY,
+#                     "content-type": "application/json"
+#                 },
+#                 json={
+#                     "sender": {"name": "JinniChirag Admin", "email": "poudelrupace@gmail.com"},
+#                     "to": [{"email": email}],
+#                     "subject": "JinniChirag Admin - Password Reset",
+#                     "htmlContent": f"""
+#                         <html>
+#                           <body>
+#                             <h2>Password Reset Request</h2>
+#                             <p>You requested to reset your password for JinniChirag Admin Panel.</p>
+#                             <p>Click the link below to reset your password:</p>
+#                             <p><a href="{reset_link}">Reset Password</a></p>
+#                             <p>This link will expire in 1 hour.</p>
+#                             <p>If you didn't request this, please ignore this email.</p>
+#                             <br>
+#                             <p>- JinniChirag Team</p>
+#                           </body>
+#                         </html>
+#                     """
+#                 },
+#                 timeout=10
+#             )
+#             if response.status_code == 201:
+#                 logger.info(f"Password reset email sent to {email} via Brevo API")
+#                 return
+#             else:
+#                 logger.error(f"Brevo API failed: {response.status_code} - {response.text}")
+#                 raise Exception("Brevo API failed")
+#         except Exception as e:
+#             logger.error(f"Brevo API error: {e}")
+#             raise
     
-    # Fallback to SMTP for local development
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
-        logger.error("Neither Brevo API nor SMTP credentials configured")
-        raise Exception("Email service not configured")
+#     # Fallback to SMTP for local development
+#     if not SMTP_EMAIL or not SMTP_PASSWORD:
+#         logger.error("Neither Brevo API nor SMTP credentials configured")
+#         raise Exception("Email service not configured")
     
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
+#     import smtplib
+#     from email.mime.text import MIMEText
+#     from email.mime.multipart import MIMEMultipart
     
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "JinniChirag Admin - Password Reset"
-    message["From"] = SMTP_EMAIL
-    message["To"] = email
+#     message = MIMEMultipart("alternative")
+#     message["Subject"] = "JinniChirag Admin - Password Reset"
+#     message["From"] = SMTP_EMAIL
+#     message["To"] = email
     
-    html = f"""
-    <html>
-      <body>
-        <h2>Password Reset Request</h2>
-        <p>You requested to reset your password for JinniChirag Admin Panel.</p>
-        <p>Click the link below to reset your password:</p>
-        <p><a href="{reset_link}">Reset Password</a></p>
-        <p>This link will expire in 1 hour.</p>
-        <p>If you didn't request this, please ignore this email.</p>
-        <br>
-        <p>- JinniChirag Team</p>
-      </body>
-    </html>
-    """
+#     html = f"""
+#     <html>
+#       <body>
+#         <h2>Password Reset Request</h2>
+#         <p>You requested to reset your password for JinniChirag Admin Panel.</p>
+#         <p>Click the link below to reset your password:</p>
+#         <p><a href="{reset_link}">Reset Password</a></p>
+#         <p>This link will expire in 1 hour.</p>
+#         <p>If you didn't request this, please ignore this email.</p>
+#         <br>
+#         <p>- JinniChirag Team</p>
+#       </body>
+#     </html>
+#     """
     
-    part = MIMEText(html, "html")
-    message.attach(part)
+#     part = MIMEText(html, "html")
+#     message.attach(part)
     
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
-        server.ehlo()
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.sendmail(SMTP_EMAIL, email, message.as_string())
+#     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+#         server.ehlo()
+#         server.login(SMTP_EMAIL, SMTP_PASSWORD)
+#         server.sendmail(SMTP_EMAIL, email, message.as_string())
     
-    logger.info(f"Password reset email sent to {email} via SMTP")
+#     logger.info(f"Password reset email sent to {email} via SMTP")
 
-def serialize_booking(booking: dict) -> dict:
-    """Convert MongoDB document to JSON-safe format"""
-    booking["_id"] = str(booking["_id"])
-    if "otp" in booking:
-        del booking["otp"]
-    if "created_at" in booking and isinstance(booking["created_at"], datetime):
-        booking["created_at"] = booking["created_at"].isoformat()
-    if "updated_at" in booking and isinstance(booking["updated_at"], datetime):
-        booking["updated_at"] = booking["updated_at"].isoformat()
-    return booking
+# def serialize_booking(booking: dict) -> dict:
+#     """Convert MongoDB document to JSON-safe format"""
+#     booking["_id"] = str(booking["_id"])
+#     if "otp" in booking:
+#         del booking["otp"]
+#     if "created_at" in booking and isinstance(booking["created_at"], datetime):
+#         booking["created_at"] = booking["created_at"].isoformat()
+#     if "updated_at" in booking and isinstance(booking["updated_at"], datetime):
+#         booking["updated_at"] = booking["updated_at"].isoformat()
+#     return booking
 
-def serialize_knowledge(knowledge: dict) -> dict:
-    """Convert knowledge document to JSON-safe format"""
-    knowledge["_id"] = str(knowledge["_id"])
-    if "created_at" in knowledge and isinstance(knowledge["created_at"], datetime):
-        knowledge["created_at"] = knowledge["created_at"].isoformat()
-    if "updated_at" in knowledge and isinstance(knowledge["updated_at"], datetime):
-        knowledge["updated_at"] = knowledge["updated_at"].isoformat()
-    return knowledge
+# def serialize_knowledge(knowledge: dict) -> dict:
+#     """Convert knowledge document to JSON-safe format"""
+#     knowledge["_id"] = str(knowledge["_id"])
+#     if "created_at" in knowledge and isinstance(knowledge["created_at"], datetime):
+#         knowledge["created_at"] = knowledge["created_at"].isoformat()
+#     if "updated_at" in knowledge and isinstance(knowledge["updated_at"], datetime):
+#         knowledge["updated_at"] = knowledge["updated_at"].isoformat()
+#     return knowledge
 
-# ==========================================================
-# KNOWLEDGE BASE FUNCTIONS
-# ==========================================================
+# # ==========================================================
+# # KNOWLEDGE BASE FUNCTIONS
+# # ==========================================================
 
-def load_knowledge_from_db(language: str) -> str:
-    """Load knowledge base content from database for specific language"""
-    try:
-        # Get all active knowledge entries for the specified language
-        knowledge_entries = knowledge_collection.find({
-            "language": language,
-            "is_active": True
-        }).sort("created_at", -1)
+# def load_knowledge_from_db(language: str) -> str:
+#     """Load knowledge base content from database for specific language"""
+#     try:
+#         # Get all active knowledge entries for the specified language
+#         knowledge_entries = knowledge_collection.find({
+#             "language": language,
+#             "is_active": True
+#         }).sort("created_at", -1)
         
-        # Combine all content
-        content_blocks = []
-        for entry in knowledge_entries:
-            content_blocks.append(entry.get("content", ""))
+#         # Combine all content
+#         content_blocks = []
+#         for entry in knowledge_entries:
+#             content_blocks.append(entry.get("content", ""))
         
-        return "\n\n".join(content_blocks)
-    except Exception as e:
-        logger.error(f"Error loading knowledge from database: {e}")
-        return ""
+#         return "\n\n".join(content_blocks)
+#     except Exception as e:
+#         logger.error(f"Error loading knowledge from database: {e}")
+#         return ""
 
-# ==========================================================
-# SYSTEM PROMPTS
-# ==========================================================
+# # ==========================================================
+# # SYSTEM PROMPTS
+# # ==========================================================
 
-LANGUAGE_MAP = {
-    "en": "English",
-    "ne": "Nepali",
-    "hi": "Hindi",
-    "mr": "Marathi",
-}
+# LANGUAGE_MAP = {
+#     "en": "English",
+#     "ne": "Nepali",
+#     "hi": "Hindi",
+#     "mr": "Marathi",
+# }
 
-def get_base_system_prompt(language: str) -> str:
-    """Generate system prompt with knowledge base content for specific language"""
-    website_content = load_knowledge_from_db(language)
+# def get_base_system_prompt(language: str) -> str:
+#     """Generate system prompt with knowledge base content for specific language"""
+#     website_content = load_knowledge_from_db(language)
     
-    return f"""
-You are the official AI assistant for the website "JinniChirag Makeup Artist".
+#     return f"""
+# You are the official AI assistant for the website "JinniChirag Makeup Artist".
 
-Rules:
-- Answer ONLY using the website content and conversation context.
-- Allowed topics: services, makeup, booking, Chirag Sharma.
-- Be professional, polite, and concise.
-- If information is missing, clearly say you do not have that information.
-- NEVER invent prices, experience, or contact details.
+# Rules:
+# - Answer ONLY using the website content and conversation context.
+# - Allowed topics: services, makeup, booking, Chirag Sharma.
+# - Be professional, polite, and concise.
+# - If information is missing, clearly say you do not have that information.
+# - NEVER invent prices, experience, or contact details.
 
-Website Content:
-{website_content}
-"""
+# Website Content:
+# {website_content}
+# """
 
-# ############################################################
-# PUBLIC ROUTES
-# ############################################################
+# # ############################################################
+# # PUBLIC ROUTES
+# # ############################################################
 
-@app.get("/health")
-async def health():
-    """Health check endpoint"""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+# @app.get("/health")
+# async def health():
+#     """Health check endpoint"""
+#     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
-@app.post("/chat")
-async def chat(req: ChatRequest):
-    """Public chatbot endpoint"""
+# @app.post("/chat")
+# async def chat(req: ChatRequest):
+#     """Public chatbot endpoint"""
     
-    language_name = LANGUAGE_MAP.get(req.language)
-    if not language_name:
-        raise HTTPException(status_code=400, detail="Unsupported language")
+#     language_name = LANGUAGE_MAP.get(req.language)
+#     if not language_name:
+#         raise HTTPException(status_code=400, detail="Unsupported language")
 
-    language_reset_prompt = f"""
-IMPORTANT LANGUAGE CONTROL RULES:
-- You must respond ONLY in {language_name}.
-- Do NOT mix languages.
-- Do NOT automatically switch languages based on user input.
-- If the user writes in a different language than {language_name}, do NOT reply in that language.
+#     language_reset_prompt = f"""
+# IMPORTANT LANGUAGE CONTROL RULES:
+# - You must respond ONLY in {language_name}.
+# - Do NOT mix languages.
+# - Do NOT automatically switch languages based on user input.
+# - If the user writes in a different language than {language_name}, do NOT reply in that language.
 
-USER GUIDANCE RULE:
-- If the user uses a different language, politely inform them:
-  "Please select your preferred language from the language selector above.
-   I can respond only in the selected language."
+# USER GUIDANCE RULE:
+# - If the user uses a different language, politely inform them:
+#   "Please select your preferred language from the language selector above.
+#    I can respond only in the selected language."
 
-STRICTLY FORBIDDEN:
-- Do NOT say you lack support for any language.
-- Do NOT mention internal limitations, models, or capabilities.
-- Do NOT apologize for language support.
-"""
+# STRICTLY FORBIDDEN:
+# - Do NOT say you lack support for any language.
+# - Do NOT mention internal limitations, models, or capabilities.
+# - Do NOT apologize for language support.
+# """
 
-    # Get the base system prompt with knowledge base content
-    base_prompt = get_base_system_prompt(req.language)
+#     # Get the base system prompt with knowledge base content
+#     base_prompt = get_base_system_prompt(req.language)
     
-    messages_for_ai = [
-        {"role": "system", "content": base_prompt},
-        {"role": "system", "content": language_reset_prompt},
-    ]
+#     messages_for_ai = [
+#         {"role": "system", "content": base_prompt},
+#         {"role": "system", "content": language_reset_prompt},
+#     ]
 
-    for msg in req.messages:
-        messages_for_ai.append(msg.dict())
+#     for msg in req.messages:
+#         messages_for_ai.append(msg.dict())
 
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": messages_for_ai,
-                "temperature": 0.4,
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        logger.error(f"GROQ API failure: {e}")
-        raise HTTPException(status_code=500, detail="AI service unavailable")
+#     try:
+#         response = requests.post(
+#             "https://api.groq.com/openai/v1/chat/completions",
+#             headers={
+#                 "Authorization": f"Bearer {GROQ_API_KEY}",
+#                 "Content-Type": "application/json",
+#             },
+#             json={
+#                 "model": "llama-3.1-8b-instant",
+#                 "messages": messages_for_ai,
+#                 "temperature": 0.4,
+#             },
+#             timeout=20,
+#         )
+#     except Exception as e:
+#         logger.error(f"GROQ API failure: {e}")
+#         raise HTTPException(status_code=500, detail="AI service unavailable")
 
-    data = response.json()
+#     data = response.json()
 
-    return {
-        "reply": data["choices"][0]["message"]["content"]
-    }
+#     return {
+#         "reply": data["choices"][0]["message"]["content"]
+#     }
 
 
 
-# BOOKING APIs
-TEMP_BOOKING_OTPS = {}
+# # BOOKING APIs
+# TEMP_BOOKING_OTPS = {}
 
-@app.post("/bookings/request")
-async def request_booking(booking: BookingRequest):
-    """Send or resend OTP (single booking_id)"""
+# @app.post("/bookings/request")
+# async def request_booking(booking: BookingRequest):
+#     """Send or resend OTP (single booking_id)"""
 
-    if not re.match(r"^\+\d{10,15}$", booking.phone):
-        raise HTTPException(400, "Invalid phone number format")
+#     if not re.match(r"^\+\d{10,15}$", booking.phone):
+#         raise HTTPException(400, "Invalid phone number format")
 
-    otp = str(randint(100000, 999999))
-    expires_at = datetime.utcnow() + timedelta(minutes=5)
+#     otp = str(randint(100000, 999999))
+#     expires_at = datetime.utcnow() + timedelta(minutes=5)
 
-    # 🔁 RESEND OTP (reuse SAME booking_id)
-    if booking.booking_id:
-        if booking.booking_id not in TEMP_BOOKING_OTPS:
-            raise HTTPException(400, "Invalid or expired booking request")
+#     # 🔁 RESEND OTP (reuse SAME booking_id)
+#     if booking.booking_id:
+#         if booking.booking_id not in TEMP_BOOKING_OTPS:
+#             raise HTTPException(400, "Invalid or expired booking request")
 
-        TEMP_BOOKING_OTPS[booking.booking_id] = {
-            "otp": otp,
-            "expires_at": expires_at,
-            "booking_data": booking.dict(exclude={"booking_id"})
-        }
+#         TEMP_BOOKING_OTPS[booking.booking_id] = {
+#             "otp": otp,
+#             "expires_at": expires_at,
+#             "booking_data": booking.dict(exclude={"booking_id"})
+#         }
 
-        booking_id = booking.booking_id
+#         booking_id = booking.booking_id
 
-    # 🆕 FIRST REQUEST
-    else:
-        booking_id = secrets.token_urlsafe(16)
-        TEMP_BOOKING_OTPS[booking_id] = {
-            "otp": otp,
-            "expires_at": expires_at,
-            "booking_data": booking.dict()
-        }
+#     # 🆕 FIRST REQUEST
+#     else:
+#         booking_id = secrets.token_urlsafe(16)
+#         TEMP_BOOKING_OTPS[booking_id] = {
+#             "otp": otp,
+#             "expires_at": expires_at,
+#             "booking_data": booking.dict()
+#         }
 
-    # 📲 Send OTP
-    try:
-        twilio_client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            to=f"whatsapp:{booking.phone}",
-            body=f"Your JinniChirag booking OTP is {otp}"
-        )
-    except Exception:
-        TEMP_BOOKING_OTPS.pop(booking_id, None)
-        raise HTTPException(500, "Failed to send WhatsApp OTP")
+#     # 📲 Send OTP
+#     try:
+#         twilio_client.messages.create(
+#             from_=TWILIO_WHATSAPP_FROM,
+#             to=f"whatsapp:{booking.phone}",
+#             body=f"Your JinniChirag booking OTP is {otp}"
+#         )
+#     except Exception:
+#         TEMP_BOOKING_OTPS.pop(booking_id, None)
+#         raise HTTPException(500, "Failed to send WhatsApp OTP")
 
-    return {
-        "booking_id": booking_id,
-        "message": "OTP sent via WhatsApp"
-    }
+#     return {
+#         "booking_id": booking_id,
+#         "message": "OTP sent via WhatsApp"
+#     }
 
-@app.post("/bookings/verify-otp")
-async def verify_otp(data: OtpVerifyRequest):
-    temp = TEMP_BOOKING_OTPS.get(data.booking_id)
+# @app.post("/bookings/verify-otp")
+# async def verify_otp(data: OtpVerifyRequest):
+#     temp = TEMP_BOOKING_OTPS.get(data.booking_id)
 
-    if not temp:
-        raise HTTPException(400, "Invalid or expired booking request")
+#     if not temp:
+#         raise HTTPException(400, "Invalid or expired booking request")
 
-    if datetime.utcnow() > temp["expires_at"]:
-        TEMP_BOOKING_OTPS.pop(data.booking_id, None)
-        raise HTTPException(400, "OTP expired")
+#     if datetime.utcnow() > temp["expires_at"]:
+#         TEMP_BOOKING_OTPS.pop(data.booking_id, None)
+#         raise HTTPException(400, "OTP expired")
 
-    if data.otp != temp["otp"]:
-        raise HTTPException(400, "Invalid OTP")
+#     if data.otp != temp["otp"]:
+#         raise HTTPException(400, "Invalid OTP")
 
-    # ✅ OTP VERIFIED → SAVE TO DB
-    booking_data = temp["booking_data"]
-    booking_data.update({
-        "status": "pending",
-        "otp_verified": True,
-        "created_at": datetime.utcnow()
-    })
+#     # ✅ OTP VERIFIED → SAVE TO DB
+#     booking_data = temp["booking_data"]
+#     booking_data.update({
+#         "status": "pending",
+#         "otp_verified": True,
+#         "created_at": datetime.utcnow()
+#     })
 
-    result = booking_collection.insert_one(booking_data)
+#     result = booking_collection.insert_one(booking_data)
 
-    TEMP_BOOKING_OTPS.pop(data.booking_id, None)
+#     TEMP_BOOKING_OTPS.pop(data.booking_id, None)
 
-    return {
-        "message": "Booking confirmed",
-        "booking_id": str(result.inserted_id)
-    }
+#     return {
+#         "message": "Booking confirmed",
+#         "booking_id": str(result.inserted_id)
+#     }
 
-# ############################################################
-# ADMIN ROUTES - AUTHENTICATION
-# ############################################################
+# # ############################################################
+# # ADMIN ROUTES - AUTHENTICATION
+# # ############################################################
 
-@app.post("/admin/login")
-async def admin_login(credentials: AdminLoginRequest):
-    """Admin login endpoint - returns JWT token"""
+# @app.post("/admin/login")
+# async def admin_login(credentials: AdminLoginRequest):
+#     """Admin login endpoint - returns JWT token"""
     
-    admin = admin_collection.find_one({"email": credentials.email})
+#     admin = admin_collection.find_one({"email": credentials.email})
     
-    if not admin:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+#     if not admin:
+#         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not verify_password(credentials.password, admin["password"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+#     if not verify_password(credentials.password, admin["password"]):
+#         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    token = create_jwt_token(credentials.email, admin["role"])
+#     token = create_jwt_token(credentials.email, admin["role"])
     
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "email": admin["email"],
-        "role": admin["role"]
-    }
+#     return {
+#         "access_token": token,
+#         "token_type": "bearer",
+#         "email": admin["email"],
+#         "role": admin["role"]
+#     }
 
-@app.post("/admin/forgot-password")
-async def admin_forgot_password(request: AdminPasswordResetRequest):
-    """Request password reset - sends email with reset token"""
+# @app.post("/admin/forgot-password")
+# async def admin_forgot_password(request: AdminPasswordResetRequest):
+#     """Request password reset - sends email with reset token"""
     
-    email = request.email.lower()
+#     email = request.email.lower()
     
-    # Only permanent admins can reset
-    if email not in PERMANENT_ADMINS:
-        return {
-            "message": "If your email is registered, you will receive a password reset link"
-        }
+#     # Only permanent admins can reset
+#     if email not in PERMANENT_ADMINS:
+#         return {
+#             "message": "If your email is registered, you will receive a password reset link"
+#         }
     
-    reset_token = secrets.token_urlsafe(32)
-    hashed_token = hash_password(reset_token)
+#     reset_token = secrets.token_urlsafe(32)
+#     hashed_token = hash_password(reset_token)
     
-    reset_token_collection.insert_one({
-        "email": email,
-        "token": hashed_token,
-        "created_at": datetime.utcnow(),
-        "expires_at": datetime.utcnow() + timedelta(hours=1),
-        "used": False
-    })
+#     reset_token_collection.insert_one({
+#         "email": email,
+#         "token": hashed_token,
+#         "created_at": datetime.utcnow(),
+#         "expires_at": datetime.utcnow() + timedelta(hours=1),
+#         "used": False
+#     })
     
-    # FIXED: Never expose SMTP errors (security best practice)
-    try:
-        send_password_reset_email(email, reset_token)
-    except Exception as e:
-        logger.error(f"Password reset email failed for {email}: {e}")
-        # Still return success to prevent email enumeration
+#     # FIXED: Never expose SMTP errors (security best practice)
+#     try:
+#         send_password_reset_email(email, reset_token)
+#     except Exception as e:
+#         logger.error(f"Password reset email failed for {email}: {e}")
+#         # Still return success to prevent email enumeration
     
-    return {
-        "message": "If your email is registered, you will receive a password reset link"
-    }
+#     return {
+#         "message": "If your email is registered, you will receive a password reset link"
+#     }
 
-@app.post("/admin/reset-password")
-async def admin_reset_password(request: AdminPasswordResetConfirm):
-    """Reset password using token from email - Auto-creates admin if not exists"""
+# @app.post("/admin/reset-password")
+# async def admin_reset_password(request: AdminPasswordResetConfirm):
+#     """Reset password using token from email - Auto-creates admin if not exists"""
     
-    valid_tokens = reset_token_collection.find({
-        "expires_at": {"$gt": datetime.utcnow()},
-        "used": False
-    })
+#     valid_tokens = reset_token_collection.find({
+#         "expires_at": {"$gt": datetime.utcnow()},
+#         "used": False
+#     })
     
-    token_doc = None
-    for doc in valid_tokens:
-        if verify_password(request.token, doc["token"]):
-            token_doc = doc
-            break
+#     token_doc = None
+#     for doc in valid_tokens:
+#         if verify_password(request.token, doc["token"]):
+#             token_doc = doc
+#             break
     
-    if not token_doc:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+#     if not token_doc:
+#         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     
-    # Mark token as used
-    reset_token_collection.update_one(
-        {"_id": token_doc["_id"]},
-        {"$set": {"used": True}}
-    )
+#     # Mark token as used
+#     reset_token_collection.update_one(
+#         {"_id": token_doc["_id"]},
+#         {"$set": {"used": True}}
+#     )
     
-    # Check if admin exists
-    admin = admin_collection.find_one({"email": token_doc["email"]})
-    new_hashed_password = hash_password(request.new_password)
+#     # Check if admin exists
+#     admin = admin_collection.find_one({"email": token_doc["email"]})
+#     new_hashed_password = hash_password(request.new_password)
     
-    if not admin:
-        # Auto-create admin on first reset
-        admin_collection.insert_one({
-            "email": token_doc["email"],
-            "password": new_hashed_password,
-            "role": "admin",
-            "created_at": datetime.utcnow()
-        })
-    else:
-        # Update existing admin password
-        admin_collection.update_one(
-            {"email": token_doc["email"]},
-            {"$set": {"password": new_hashed_password}}
-        )
+#     if not admin:
+#         # Auto-create admin on first reset
+#         admin_collection.insert_one({
+#             "email": token_doc["email"],
+#             "password": new_hashed_password,
+#             "role": "admin",
+#             "created_at": datetime.utcnow()
+#         })
+#     else:
+#         # Update existing admin password
+#         admin_collection.update_one(
+#             {"email": token_doc["email"]},
+#             {"$set": {"password": new_hashed_password}}
+#         )
     
-    return {"message": "Password reset successful"}
+#     return {"message": "Password reset successful"}
 
-@app.get("/admin/verify-token")
-async def verify_admin_token(admin: dict = Depends(get_current_admin)):
-    """Verify if current token is valid"""
-    return {
-        "valid": True,
-        "email": admin["email"],
-        "role": admin["role"]
-    }
+# @app.get("/admin/verify-token")
+# async def verify_admin_token(admin: dict = Depends(get_current_admin)):
+#     """Verify if current token is valid"""
+#     return {
+#         "valid": True,
+#         "email": admin["email"],
+#         "role": admin["role"]
+#     }
 
-# ############################################################
-# ADMIN ROUTES - BOOKING MANAGEMENT
-# ############################################################
+# # ############################################################
+# # ADMIN ROUTES - BOOKING MANAGEMENT
+# # ############################################################
 
-@app.get("/admin/bookings")
-async def get_all_bookings(
-    status: Optional[str] = None,
-    limit: int = 50,
-    skip: int = 0,
-    admin: dict = Depends(get_current_admin)
-):
-    """Get all bookings with optional filtering"""
+# @app.get("/admin/bookings")
+# async def get_all_bookings(
+#     status: Optional[str] = None,
+#     limit: int = 50,
+#     skip: int = 0,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Get all bookings with optional filtering"""
     
-    query = {}
-    if status:
-        query["status"] = status
+#     query = {}
+#     if status:
+#         query["status"] = status
     
-    bookings = list(
-        booking_collection
-        .find(query)
-        .sort("created_at", -1)
-        .skip(skip)
-        .limit(limit)
-    )
+#     bookings = list(
+#         booking_collection
+#         .find(query)
+#         .sort("created_at", -1)
+#         .skip(skip)
+#         .limit(limit)
+#     )
     
-    total = booking_collection.count_documents(query)
+#     total = booking_collection.count_documents(query)
     
-    return {
-        "bookings": [serialize_booking(b) for b in bookings],
-        "total": total,
-        "limit": limit,
-        "skip": skip
-    }
+#     return {
+#         "bookings": [serialize_booking(b) for b in bookings],
+#         "total": total,
+#         "limit": limit,
+#         "skip": skip
+#     }
 
-@app.post("/admin/bookings/search")
-async def search_bookings(
-    query: BookingSearchQuery,
-    admin: dict = Depends(get_current_admin)
-):
-    """Advanced booking search"""
+# @app.post("/admin/bookings/search")
+# async def search_bookings(
+#     query: BookingSearchQuery,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Advanced booking search"""
     
-    filters = {}
+#     filters = {}
     
-    if query.status:
-        filters["status"] = query.status
+#     if query.status:
+#         filters["status"] = query.status
     
-    if query.search:
-        filters["$or"] = [
-            {"name": {"$regex": query.search, "$options": "i"}},
-            {"email": {"$regex": query.search, "$options": "i"}},
-            {"phone": {"$regex": query.search, "$options": "i"}},
-            {"service": {"$regex": query.search, "$options": "i"}}
-        ]
+#     if query.search:
+#         filters["$or"] = [
+#             {"name": {"$regex": query.search, "$options": "i"}},
+#             {"email": {"$regex": query.search, "$options": "i"}},
+#             {"phone": {"$regex": query.search, "$options": "i"}},
+#             {"service": {"$regex": query.search, "$options": "i"}}
+#         ]
     
-    if query.date_from or query.date_to:
-        date_filter = {}
-        if query.date_from:
-            date_filter["$gte"] = query.date_from
-        if query.date_to:
-            date_filter["$lte"] = query.date_to
-        filters["date"] = date_filter
+#     if query.date_from or query.date_to:
+#         date_filter = {}
+#         if query.date_from:
+#             date_filter["$gte"] = query.date_from
+#         if query.date_to:
+#             date_filter["$lte"] = query.date_to
+#         filters["date"] = date_filter
     
-    bookings = list(
-        booking_collection
-        .find(filters)
-        .sort("created_at", -1)
-        .skip(query.skip)
-        .limit(query.limit)
-    )
+#     bookings = list(
+#         booking_collection
+#         .find(filters)
+#         .sort("created_at", -1)
+#         .skip(query.skip)
+#         .limit(query.limit)
+#     )
     
-    total = booking_collection.count_documents(filters)
+#     total = booking_collection.count_documents(filters)
     
-    return {
-        "bookings": [serialize_booking(b) for b in bookings],
-        "total": total
-    }
+#     return {
+#         "bookings": [serialize_booking(b) for b in bookings],
+#         "total": total
+#     }
 
-@app.get("/admin/bookings/{booking_id}")
-async def get_booking_details(
-    booking_id: str,
-    admin: dict = Depends(get_current_admin)
-):
-    """Get single booking details"""
+# @app.get("/admin/bookings/{booking_id}")
+# async def get_booking_details(
+#     booking_id: str,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Get single booking details"""
     
-    try:
-        booking = booking_collection.find_one({"_id": ObjectId(booking_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid booking ID")
+#     try:
+#         booking = booking_collection.find_one({"_id": ObjectId(booking_id)})
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid booking ID")
     
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
+#     if not booking:
+#         raise HTTPException(status_code=404, detail="Booking not found")
     
-    return serialize_booking(booking)
+#     return serialize_booking(booking)
 
-@app.patch("/admin/bookings/{booking_id}/status")
-async def update_booking_status(
-    booking_id: str,
-    status_update: BookingStatusUpdate,
-    admin: dict = Depends(get_current_admin)
-):
-    """Update booking status and send WhatsApp notification"""
+# @app.patch("/admin/bookings/{booking_id}/status")
+# async def update_booking_status(
+#     booking_id: str,
+#     status_update: BookingStatusUpdate,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Update booking status and send WhatsApp notification"""
     
-    try:
-        booking = booking_collection.find_one({"_id": ObjectId(booking_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid booking ID")
+#     try:
+#         booking = booking_collection.find_one({"_id": ObjectId(booking_id)})
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid booking ID")
     
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
+#     if not booking:
+#         raise HTTPException(status_code=404, detail="Booking not found")
     
-    new_status = status_update.status
+#     new_status = status_update.status
     
-    # Send WhatsApp messages based on status change
-    if new_status == "approved":
-        message = (
-            f"Hello {booking['name']} 👋\n\n"
-            f"✅ Your appointment with *JinniChirag Makeup Artist* is CONFIRMED!\n\n"
-            f"📅 Date: {booking['date']}\n"
-            f"📍 Location: {booking['address']}, {booking['pincode']}\n"
-            f"🎨 Service: {booking['service']} - {booking['package']}\n\n"
-            f"I'm looking forward to making you look stunning! 💄✨\n\n"
-            f"See you soon!\n"
-            f"- Chirag Sharma"
-        )
-        send_whatsapp_message(booking["phone"], message)
-        logger.info(f"Approved booking {booking_id} - WhatsApp sent to {booking['phone']}")
+#     # Send WhatsApp messages based on status change
+#     if new_status == "approved":
+#         message = (
+#             f"Hello {booking['name']} 👋\n\n"
+#             f"✅ Your appointment with *JinniChirag Makeup Artist* is CONFIRMED!\n\n"
+#             f"📅 Date: {booking['date']}\n"
+#             f"📍 Location: {booking['address']}, {booking['pincode']}\n"
+#             f"🎨 Service: {booking['service']} - {booking['package']}\n\n"
+#             f"I'm looking forward to making you look stunning! 💄✨\n\n"
+#             f"See you soon!\n"
+#             f"- Chirag Sharma"
+#         )
+#         send_whatsapp_message(booking["phone"], message)
+#         logger.info(f"Approved booking {booking_id} - WhatsApp sent to {booking['phone']}")
     
-    elif new_status == "cancelled":
-        message = (
-            f"Hello {booking['name']} 🙏\n\n"
-            f"I'm sorry, but I'm not available on {booking['date']} 😔\n\n"
-            f"Please feel free to book another appointment that works for you.\n\n"
-            f"I apologize for the inconvenience and hope to serve you soon!\n\n"
-            f"Thank you for understanding.\n"
-            f"- Chirag Sharma"
-        )
-        send_whatsapp_message(booking["phone"], message)
-        logger.info(f"Cancelled booking {booking_id} - WhatsApp sent to {booking['phone']}")
+#     elif new_status == "cancelled":
+#         message = (
+#             f"Hello {booking['name']} 🙏\n\n"
+#             f"I'm sorry, but I'm not available on {booking['date']} 😔\n\n"
+#             f"Please feel free to book another appointment that works for you.\n\n"
+#             f"I apologize for the inconvenience and hope to serve you soon!\n\n"
+#             f"Thank you for understanding.\n"
+#             f"- Chirag Sharma"
+#         )
+#         send_whatsapp_message(booking["phone"], message)
+#         logger.info(f"Cancelled booking {booking_id} - WhatsApp sent to {booking['phone']}")
     
-    elif new_status == "completed":
-        message = (
-            f"Hello {booking['name']} 🌸\n\n"
-            f"Thank you for choosing *JinniChirag Makeup Artist*! 💖\n\n"
-            f"I hope you absolutely loved the service and are feeling confident and beautiful! ✨\n\n"
-            f"It was wonderful working with you. Please visit again!\n\n"
-            f"Share your feedback and tag me on social media 📸\n\n"
-            f"With love,\n"
-            f"Chirag Sharma 💄"
-        )
-        send_whatsapp_message(booking["phone"], message)
-        logger.info(f"Completed booking {booking_id} - WhatsApp sent to {booking['phone']}")
+#     elif new_status == "completed":
+#         message = (
+#             f"Hello {booking['name']} 🌸\n\n"
+#             f"Thank you for choosing *JinniChirag Makeup Artist*! 💖\n\n"
+#             f"I hope you absolutely loved the service and are feeling confident and beautiful! ✨\n\n"
+#             f"It was wonderful working with you. Please visit again!\n\n"
+#             f"Share your feedback and tag me on social media 📸\n\n"
+#             f"With love,\n"
+#             f"Chirag Sharma 💄"
+#         )
+#         send_whatsapp_message(booking["phone"], message)
+#         logger.info(f"Completed booking {booking_id} - WhatsApp sent to {booking['phone']}")
     
-    # Update booking status in database
-    result = booking_collection.update_one(
-        {"_id": booking["_id"]},
-        {"$set": {"status": new_status, "updated_at": datetime.utcnow()}}
-    )
+#     # Update booking status in database
+#     result = booking_collection.update_one(
+#         {"_id": booking["_id"]},
+#         {"$set": {"status": new_status, "updated_at": datetime.utcnow()}}
+#     )
     
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Booking not found")
+#     if result.matched_count == 0:
+#         raise HTTPException(status_code=404, detail="Booking not found")
     
-    return {"message": f"Booking status updated to {new_status}"}
+#     return {"message": f"Booking status updated to {new_status}"}
 
-@app.delete("/admin/bookings/{booking_id}")
-async def delete_booking(
-    booking_id: str,
-    admin: dict = Depends(get_current_admin)
-):
-    """Delete a booking (use with caution)"""
+# @app.delete("/admin/bookings/{booking_id}")
+# async def delete_booking(
+#     booking_id: str,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Delete a booking (use with caution)"""
     
-    try:
-        result = booking_collection.delete_one({"_id": ObjectId(booking_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid booking ID")
+#     try:
+#         result = booking_collection.delete_one({"_id": ObjectId(booking_id)})
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid booking ID")
     
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Booking not found")
+#     if result.deleted_count == 0:
+#         raise HTTPException(status_code=404, detail="Booking not found")
     
-    return {"message": "Booking deleted successfully"}
+#     return {"message": "Booking deleted successfully"}
 
-# ############################################################
-# ADMIN ROUTES - KNOWLEDGE BASE MANAGEMENT
-# ############################################################
+# # ############################################################
+# # ADMIN ROUTES - KNOWLEDGE BASE MANAGEMENT
+# # ############################################################
 
-@app.post("/admin/knowledge")
-async def create_knowledge(
-    data: KnowledgeCreate,
-    admin: dict = Depends(get_current_admin)
-):
-    """Create new knowledge base entry"""
+# @app.post("/admin/knowledge")
+# async def create_knowledge(
+#     data: KnowledgeCreate,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Create new knowledge base entry"""
     
-    # Validate language
-    if data.language not in LANGUAGE_MAP:
-        raise HTTPException(status_code=400, detail="Unsupported language")
+#     # Validate language
+#     if data.language not in LANGUAGE_MAP:
+#         raise HTTPException(status_code=400, detail="Unsupported language")
     
-    knowledge_doc = {
-        "title": data.title,
-        "content": data.content,
-        "language": data.language,
-        "is_active": data.is_active,
-        "created_at": datetime.utcnow(),
-        "updated_at": None
-    }
+#     knowledge_doc = {
+#         "title": data.title,
+#         "content": data.content,
+#         "language": data.language,
+#         "is_active": data.is_active,
+#         "created_at": datetime.utcnow(),
+#         "updated_at": None
+#     }
     
-    result = knowledge_collection.insert_one(knowledge_doc)
+#     result = knowledge_collection.insert_one(knowledge_doc)
     
-    return {
-        "message": "Knowledge base entry created successfully",
-        "id": str(result.inserted_id)
-    }
+#     return {
+#         "message": "Knowledge base entry created successfully",
+#         "id": str(result.inserted_id)
+#     }
 
-@app.get("/admin/knowledge")
-async def get_all_knowledge(
-    language: Optional[str] = None,
-    is_active: Optional[bool] = None,
-    admin: dict = Depends(get_current_admin)
-):
-    """Get all knowledge base entries with optional filtering"""
+# @app.get("/admin/knowledge")
+# async def get_all_knowledge(
+#     language: Optional[str] = None,
+#     is_active: Optional[bool] = None,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Get all knowledge base entries with optional filtering"""
     
-    query = {}
+#     query = {}
     
-    if language:
-        if language not in LANGUAGE_MAP:
-            raise HTTPException(status_code=400, detail="Unsupported language")
-        query["language"] = language
+#     if language:
+#         if language not in LANGUAGE_MAP:
+#             raise HTTPException(status_code=400, detail="Unsupported language")
+#         query["language"] = language
     
-    if is_active is not None:
-        query["is_active"] = is_active
+#     if is_active is not None:
+#         query["is_active"] = is_active
     
-    knowledge_entries = list(
-        knowledge_collection
-        .find(query)
-        .sort("created_at", -1)
-    )
+#     knowledge_entries = list(
+#         knowledge_collection
+#         .find(query)
+#         .sort("created_at", -1)
+#     )
     
-    return [serialize_knowledge(entry) for entry in knowledge_entries]
+#     return [serialize_knowledge(entry) for entry in knowledge_entries]
 
-@app.get("/admin/knowledge/{knowledge_id}")
-async def get_knowledge_entry(
-    knowledge_id: str,
-    admin: dict = Depends(get_current_admin)
-):
-    """Get single knowledge base entry"""
+# @app.get("/admin/knowledge/{knowledge_id}")
+# async def get_knowledge_entry(
+#     knowledge_id: str,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Get single knowledge base entry"""
     
-    try:
-        knowledge = knowledge_collection.find_one({"_id": ObjectId(knowledge_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid knowledge ID")
+#     try:
+#         knowledge = knowledge_collection.find_one({"_id": ObjectId(knowledge_id)})
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid knowledge ID")
     
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
+#     if not knowledge:
+#         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     
-    return serialize_knowledge(knowledge)
+#     return serialize_knowledge(knowledge)
 
-@app.patch("/admin/knowledge/{knowledge_id}")
-async def update_knowledge_entry(
-    knowledge_id: str,
-    data: KnowledgeUpdate,
-    admin: dict = Depends(get_current_admin)
-):
-    """Update knowledge base entry"""
+# @app.patch("/admin/knowledge/{knowledge_id}")
+# async def update_knowledge_entry(
+#     knowledge_id: str,
+#     data: KnowledgeUpdate,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Update knowledge base entry"""
     
-    try:
-        knowledge = knowledge_collection.find_one({"_id": ObjectId(knowledge_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid knowledge ID")
+#     try:
+#         knowledge = knowledge_collection.find_one({"_id": ObjectId(knowledge_id)})
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid knowledge ID")
     
-    if not knowledge:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
+#     if not knowledge:
+#         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     
-    # Validate language if provided
-    if data.language and data.language not in LANGUAGE_MAP:
-        raise HTTPException(status_code=400, detail="Unsupported language")
+#     # Validate language if provided
+#     if data.language and data.language not in LANGUAGE_MAP:
+#         raise HTTPException(status_code=400, detail="Unsupported language")
     
-    # Prepare update data
-    update_data = {}
-    if data.title is not None:
-        update_data["title"] = data.title
-    if data.content is not None:
-        update_data["content"] = data.content
-    if data.language is not None:
-        update_data["language"] = data.language
-    if data.is_active is not None:
-        update_data["is_active"] = data.is_active
+#     # Prepare update data
+#     update_data = {}
+#     if data.title is not None:
+#         update_data["title"] = data.title
+#     if data.content is not None:
+#         update_data["content"] = data.content
+#     if data.language is not None:
+#         update_data["language"] = data.language
+#     if data.is_active is not None:
+#         update_data["is_active"] = data.is_active
     
-    update_data["updated_at"] = datetime.utcnow()
+#     update_data["updated_at"] = datetime.utcnow()
     
-    # Update in database
-    result = knowledge_collection.update_one(
-        {"_id": ObjectId(knowledge_id)},
-        {"$set": update_data}
-    )
+#     # Update in database
+#     result = knowledge_collection.update_one(
+#         {"_id": ObjectId(knowledge_id)},
+#         {"$set": update_data}
+#     )
     
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
+#     if result.matched_count == 0:
+#         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     
-    return {"message": "Knowledge base entry updated successfully"}
+#     return {"message": "Knowledge base entry updated successfully"}
 
-@app.delete("/admin/knowledge/{knowledge_id}")
-async def delete_knowledge_entry(
-    knowledge_id: str,
-    admin: dict = Depends(get_current_admin)
-):
-    """Delete knowledge base entry"""
+# @app.delete("/admin/knowledge/{knowledge_id}")
+# async def delete_knowledge_entry(
+#     knowledge_id: str,
+#     admin: dict = Depends(get_current_admin)
+# ):
+#     """Delete knowledge base entry"""
     
-    try:
-        result = knowledge_collection.delete_one({"_id": ObjectId(knowledge_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid knowledge ID")
+#     try:
+#         result = knowledge_collection.delete_one({"_id": ObjectId(knowledge_id)})
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid knowledge ID")
     
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
+#     if result.deleted_count == 0:
+#         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     
-    return {"message": "Knowledge base entry deleted successfully"}
+#     return {"message": "Knowledge base entry deleted successfully"}
 
-# ############################################################
-# ADMIN ROUTES - ANALYTICS & STATISTICS
-# ############################################################
+# # ############################################################
+# # ADMIN ROUTES - ANALYTICS & STATISTICS
+# # ############################################################
 
-@app.get("/admin/analytics/overview")
-async def get_analytics_overview(admin: dict = Depends(get_current_admin)):
-    """Get booking statistics overview"""
+# @app.get("/admin/analytics/overview")
+# async def get_analytics_overview(admin: dict = Depends(get_current_admin)):
+#     """Get booking statistics overview"""
     
-    total_bookings = booking_collection.count_documents({})
-    pending_bookings = booking_collection.count_documents({"status": "pending"})
-    approved_bookings = booking_collection.count_documents({"status": "approved"})
-    completed_bookings = booking_collection.count_documents({"status": "completed"})
-    cancelled_bookings = booking_collection.count_documents({"status": "cancelled"})
-    otp_pending = booking_collection.count_documents({"status": "otp_pending"})
+#     total_bookings = booking_collection.count_documents({})
+#     pending_bookings = booking_collection.count_documents({"status": "pending"})
+#     approved_bookings = booking_collection.count_documents({"status": "approved"})
+#     completed_bookings = booking_collection.count_documents({"status": "completed"})
+#     cancelled_bookings = booking_collection.count_documents({"status": "cancelled"})
+#     otp_pending = booking_collection.count_documents({"status": "otp_pending"})
     
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    recent_bookings = booking_collection.count_documents({
-        "created_at": {"$gte": seven_days_ago}
-    })
+#     seven_days_ago = datetime.utcnow() - timedelta(days=7)
+#     recent_bookings = booking_collection.count_documents({
+#         "created_at": {"$gte": seven_days_ago}
+#     })
     
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_bookings = booking_collection.count_documents({
-        "created_at": {"$gte": today_start}
-    })
+#     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+#     today_bookings = booking_collection.count_documents({
+#         "created_at": {"$gte": today_start}
+#     })
     
-    return {
-        "total_bookings": total_bookings,
-        "pending_bookings": pending_bookings,
-        "approved_bookings": approved_bookings,
-        "completed_bookings": completed_bookings,
-        "cancelled_bookings": cancelled_bookings,
-        "otp_pending": otp_pending,
-        "recent_bookings_7_days": recent_bookings,
-        "today_bookings": today_bookings
-    }
+#     return {
+#         "total_bookings": total_bookings,
+#         "pending_bookings": pending_bookings,
+#         "approved_bookings": approved_bookings,
+#         "completed_bookings": completed_bookings,
+#         "cancelled_bookings": cancelled_bookings,
+#         "otp_pending": otp_pending,
+#         "recent_bookings_7_days": recent_bookings,
+#         "today_bookings": today_bookings
+#     }
 
-@app.get("/admin/analytics/by-service")
-async def get_bookings_by_service(admin: dict = Depends(get_current_admin)):
-    """Get booking count grouped by service"""
+# @app.get("/admin/analytics/by-service")
+# async def get_bookings_by_service(admin: dict = Depends(get_current_admin)):
+#     """Get booking count grouped by service"""
     
-    pipeline = [
-        {"$group": {"_id": "$service", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}}
-    ]
+#     pipeline = [
+#         {"$group": {"_id": "$service", "count": {"$sum": 1}}},
+#         {"$sort": {"count": -1}}
+#     ]
     
-    results = list(booking_collection.aggregate(pipeline))
+#     results = list(booking_collection.aggregate(pipeline))
     
-    return {
-        "services": [
-            {"service": item["_id"], "count": item["count"]}
-            for item in results
-        ]
-    }
+#     return {
+#         "services": [
+#             {"service": item["_id"], "count": item["count"]}
+#             for item in results
+#         ]
+#     }
 
-@app.get("/admin/analytics/by-month")
-async def get_bookings_by_month(admin: dict = Depends(get_current_admin)):
-    """Get booking count by month"""
+# @app.get("/admin/analytics/by-month")
+# async def get_bookings_by_month(admin: dict = Depends(get_current_admin)):
+#     """Get booking count by month"""
     
-    pipeline = [
-        {
-            "$group": {
-                "_id": {
-                    "year": {"$year": "$created_at"},
-                    "month": {"$month": "$created_at"}
-                },
-                "count": {"$sum": 1}
-            }
-        },
-        {"$sort": {"_id.year": -1, "_id.month": -1}},
-        {"$limit": 12}
-    ]
+#     pipeline = [
+#         {
+#             "$group": {
+#                 "_id": {
+#                     "year": {"$year": "$created_at"},
+#                     "month": {"$month": "$created_at"}
+#                 },
+#                 "count": {"$sum": 1}
+#             }
+#         },
+#         {"$sort": {"_id.year": -1, "_id.month": -1}},
+#         {"$limit": 12}
+#     ]
     
-    results = list(booking_collection.aggregate(pipeline))
+#     results = list(booking_collection.aggregate(pipeline))
     
-    return {
-        "monthly_data": [
-            {
-                "year": item["_id"]["year"],
-                "month": item["_id"]["month"],
-                "count": item["count"]
-            }
-            for item in results
-        ]
-    }
+#     return {
+#         "monthly_data": [
+#             {
+#                 "year": item["_id"]["year"],
+#                 "month": item["_id"]["month"],
+#                 "count": item["count"]
+#             }
+#             for item in results
+#         ]
+#     }
 
-# ############################################################
-# END OF API
-# ############################################################
+# # ############################################################
+# # END OF API
+# # ############################################################
 
-if __name__ == "__main__":
-    import uvicorn
-    import os
+# if __name__ == "__main__":
+#     import uvicorn
+#     import os
 
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+#     port = int(os.environ.get("PORT", 8000))
+#     uvicorn.run("main:app", host="0.0.0.0", port=port)
