@@ -314,6 +314,12 @@ class BookingFSM:
                 intent.package = package
                 self.last_shown_list = None
                 
+                # CRITICAL FIX: Initialize sequential mode when entering details collection
+                if not hasattr(intent, 'metadata') or intent.metadata is None:
+                    intent.metadata = {}
+                intent.metadata['_asking_mode'] = 'sequential'
+                logger.info("🔄 Sequential mode initialized for details collection")
+                
                 logger.info(f"✅ Package selected: {package} for service: {intent.service}")
                 return (BookingState.COLLECTING_DETAILS.value, intent, {
                     "action": "package_selected",
@@ -328,6 +334,12 @@ class BookingFSM:
         if package:
             intent.package = package
             self.last_shown_list = None
+            
+            # CRITICAL FIX: Initialize sequential mode when entering details collection
+            if not hasattr(intent, 'metadata') or intent.metadata is None:
+                intent.metadata = {}
+            intent.metadata['_asking_mode'] = 'sequential'
+            logger.info("🔄 Sequential mode initialized for details collection")
             
             logger.info(f"✅ Package selected via keywords: {package}")
             return (BookingState.COLLECTING_DETAILS.value, intent, {

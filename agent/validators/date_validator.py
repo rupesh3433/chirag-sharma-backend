@@ -304,12 +304,12 @@ class DateValidator:
                 'suggestion': 'Please provide a current or future date'
             }
         
-        # Check if date is too far in future (more than 2 years)
-        if days_diff > 730:  # ~2 years
+        # Check if date is too far in future (INCREASED TO 5 YEARS)
+        if days_diff > 1825:  # ~5 years (was 730 = 2 years)
             return {
                 'valid': False,
                 'error': f'Date is {days_diff} days in the future',
-                'suggestion': 'Please provide a date within the next 2 years'
+                'suggestion': 'Please provide a date within the next 5 years'
             }
         
         # Warn if date is in very near future (less than 3 days)
