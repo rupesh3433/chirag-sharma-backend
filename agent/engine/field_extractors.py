@@ -1,7 +1,7 @@
 """
-FIELD EXTRACTOR - MAXIMUM ENHANCED VERSION
-Leverages ALL extractor capabilities for perfect field extraction
-FIXED: Proper field extraction order - address should not be confused with name
+FIELD EXTRACTOR - ULTIMATE MULTI-FIELD EXTRACTION
+Handles complex scenarios where all fields are provided in one sentence
+FIXED: Progressive cleaning, proper field isolation, order of extraction
 """
 
 import re
@@ -11,7 +11,7 @@ from datetime import datetime
 from ..models.intent import BookingIntent
 from ..extractors import (
     PhoneExtractor, EmailExtractor, DateExtractor,
-    NameExtractor, AddressExtractor, PincodeExtractor,
+    NameExtractor, AddressExtractor, LLMAddressExtractor, PincodeExtractor,
     CountryExtractor
 )
 
@@ -20,13 +20,11 @@ logger = logging.getLogger(__name__)
 
 class FieldExtractors:
     """
-    MAXIMUM ENHANCED Field Extractor
-    - Uses ALL advanced methods from each extractor
-    - Cross-validates fields for consistency
-    - Infers missing fields from extracted ones
-    - Provides detailed confidence scoring
-    - SUPPORTS FIELD UPDATES (allows changing existing fields)
-    - FIXED: Proper extraction order to avoid address/name confusion
+    ULTIMATE Field Extractor - Handles multi-field extraction
+    - Progressive message cleaning after each extraction
+    - Smart field isolation to prevent interference
+    - Context-aware extraction order
+    - Robust handling of sentence-style input
     """
     
     def __init__(self):
@@ -40,39 +38,26 @@ class FieldExtractors:
         self.pincode_extractor = PincodeExtractor()
         self.country_extractor = CountryExtractor()
         
-        # Extraction priority (order matters!)
-        # FIXED: Only extract fields that are clearly present, don't force extraction
+        # Extraction priority - high confidence first
         self.EXTRACTION_ORDER = [
-            'email',      # High confidence, clear pattern
-            'phone',      # High confidence, contains country info
-            'date',       # Medium confidence, multiple formats
-            'pincode',    # Medium confidence, needs country context
+            'email',      # Very high confidence, clear pattern
+            'phone',      # Very high confidence, clear pattern
+            'pincode',    # High confidence, clear pattern
+            'date',       # Medium confidence, extract before address/name
             'country',    # Can be inferred from phone/pincode
-            'address',    # Extract address before name to avoid confusion
-            'name',       # Extract name last, after all location data is extracted
+            'address',    # Extract before name to avoid confusion
+            'name',       # Extract last, most context-dependent
         ]
         
-        logger.info("🚀 UltraFieldExtractorV2 initialized - MAXIMUM POWER MODE")
+        logger.info("🚀 UltraFieldExtractorV3 initialized - MULTI-FIELD MASTER")
     
     def extract(self, message: str, intent: BookingIntent = None, 
                 context: Dict = None) -> Dict[str, Any]:
         """
-        ULTIMATE extraction method - uses ALL extractor capabilities
-        NOW SUPPORTS FIELD UPDATES - does not skip fields that already exist
-        FIXED: Better field discrimination to avoid address/name confusion
-        
-        Returns:
-            {
-                'extracted': {...},
-                'missing': [...],
-                'confidence': 'high|medium|low',
-                'details': {...},
-                'inferred': {...},
-                'cross_validated': {...},
-                'status': 'complete|partial|failed'
-            }
+        ULTIMATE extraction method for multi-field scenarios
+        Handles: "My name is X, phone is Y, email Z, booking on DATE, address ABC"
         """
-        logger.info(f"🎯 ULTRA EXTRACTION v2.0: '{message[:100]}...'")
+        logger.info(f"🎯 ULTRA EXTRACTION v3.0: '{message[:100]}...'")
         
         # Initialize result structure
         result = {
@@ -96,37 +81,27 @@ class FieldExtractors:
         # Build enhanced context
         enhanced_context = self._build_enhanced_context(message, intent, context)
         
-        # CRITICAL FIX: Check what field we're currently asking for
-        last_asked_field = enhanced_context.get('last_asked_field')
+        # PHASE 1: Pre-process message to identify field boundaries
+        field_positions = self._identify_field_positions(message)
+        logger.info(f"📍 Field positions identified: {list(field_positions.keys())}")
         
-        # Phase 1: Sequential extraction with cross-referencing
+        # PHASE 2: Sequential extraction with progressive cleaning
         working_message = message
+        extraction_map = {}  # Track what was extracted from where
         
         for field_name in self.EXTRACTION_ORDER:
-            # SMART EXTRACTION: Only extract address if we're asking for address
-            # This prevents address from being confused with name
-            if field_name == 'address' and last_asked_field != 'address':
-                # Skip address extraction unless we specifically asked for it
-                # OR if message clearly contains address indicators
-                if not self._has_clear_address_indicators(working_message):
-                    logger.info(f"⏭️ Skipping address extraction (not asking for address)")
-                    continue
-            
-            # SMART EXTRACTION: Only extract name if we're asking for name
-            # This prevents city names from being confused with person names
-            if field_name == 'name' and last_asked_field != 'name':
-                # Skip name extraction unless we specifically asked for it
-                if intent and intent.name:
-                    logger.info(f"⏭️ Skipping name extraction (already have name)")
-                    continue
-            
-            # Extract using specialized method
-            field_result = self._extract_field_enhanced(
-                field_name, 
-                working_message, 
-                enhanced_context,
-                result['extracted']
-            )
+            # Check if field is in identified positions
+            if field_name in field_positions:
+                # Extract from specific position
+                field_text = field_positions[field_name]
+                field_result = self._extract_from_text(
+                    field_name, field_text, enhanced_context, result['extracted']
+                )
+            else:
+                # Extract from working message
+                field_result = self._extract_field_enhanced(
+                    field_name, working_message, enhanced_context, result['extracted']
+                )
             
             if field_result and field_result.get('value'):
                 # Store extracted value
@@ -138,21 +113,22 @@ class FieldExtractors:
                     'metadata': field_result.get('metadata', {})
                 }
                 
-                # Update context for next extractions
+                # Track extraction
+                extraction_map[field_name] = field_result.get('original_text', '')
+                
+                # Update context
                 enhanced_context[field_name] = field_result['value']
                 
-                # Clean message for next extraction (except address)
-                if field_name != 'address':
-                    working_message = self._remove_extracted_value(
-                        working_message, 
-                        field_result
-                    )
+                # CRITICAL: Clean extracted value from working message
+                working_message = self._remove_extracted_value(
+                    working_message, field_result
+                )
+                logger.info(f"✅ Extracted {field_name}, cleaned message: '{working_message[:80]}...'")
         
-        # Phase 2: Inference - fill missing fields using extracted ones
+        # PHASE 3: Inference
         inferred_fields = self._infer_missing_fields(result['extracted'], enhanced_context)
         result['inferred'] = inferred_fields
         
-        # Merge inferred into extracted
         for field, value in inferred_fields.items():
             if field not in result['extracted']:
                 result['extracted'][field] = value['value']
@@ -162,35 +138,29 @@ class FieldExtractors:
                     'inferred_from': value.get('source', 'unknown')
                 }
         
-        # Phase 3: Cross-validation - check consistency
+        # PHASE 4: Cross-validation
         validation_results = self._cross_validate_fields(result['extracted'])
         result['cross_validated'] = validation_results
         
-        # Add warnings for inconsistencies
         for field, validation in validation_results.items():
             if not validation.get('valid', True):
                 result['warnings'].append(
                     f"{field}: {validation.get('error', 'Validation failed')}"
                 )
         
-        # Phase 4: Post-processing and cleanup
+        # PHASE 5: Post-processing
         result['extracted'] = self._post_process_fields(result['extracted'])
         
-        # Phase 5: Calculate overall confidence
+        # PHASE 6: Calculate confidence
         result['confidence'] = self._calculate_overall_confidence(result['details'])
         
-        # Phase 6: Determine missing fields
+        # PHASE 7: Determine missing
         if intent:
-            result['missing'] = self._find_missing_required_fields(
-                intent, 
-                result['extracted']
-            )
+            result['missing'] = self._find_missing_required_fields(intent, result['extracted'])
         
-        # Phase 7: Generate suggestions
+        # PHASE 8: Generate suggestions
         result['suggestions'] = self._generate_suggestions(
-            result['extracted'], 
-            result['missing'],
-            result['warnings']
+            result['extracted'], result['missing'], result['warnings']
         )
         
         # Update status
@@ -209,28 +179,105 @@ class FieldExtractors:
         
         return result
     
-    def _has_clear_address_indicators(self, message: str) -> bool:
-        """Check if message has clear address indicators"""
+    def _identify_field_positions(self, message: str) -> Dict[str, str]:
+        """
+        Identify field boundaries in sentence-style input
+        Example: "My name is X, phone is Y, email Z" -> {name: X, phone: Y, email: Z}
+        """
+        positions = {}
         msg_lower = message.lower()
         
-        # Strong address indicators
-        strong_indicators = [
-            'street', 'road', 'lane', 'avenue', 'house', 'flat', 'apartment',
-            'building', 'floor', 'colony', 'sector', 'area', 'locality',
-            'near', 'beside', 'opposite', 'behind'
+        # Pattern: "name is X"
+        name_patterns = [
+            r'(?:my\s+)?name\s+is\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+            r'(?:i\s+am|i\'m)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
         ]
+        for pattern in name_patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                positions['name'] = match.group(1)
+                break
         
-        # Check for strong indicators
-        for indicator in strong_indicators:
-            if indicator in msg_lower:
-                return True
+        # Pattern: "phone is X" or "phone X"
+        phone_patterns = [
+            r'phone\s+(?:is\s+|number\s+(?:is\s+)?)?(\+?\d[\d\s\-\(\)]{8,})',
+            r'(?:call|whatsapp)(?:\s+(?:me\s+)?(?:at|on))?\s+(\+?\d[\d\s\-\(\)]{8,})',
+        ]
+        for pattern in phone_patterns:
+            match = re.search(pattern, msg_lower)
+            if match:
+                # Get original text with proper casing
+                start, end = match.span(1)
+                positions['phone'] = message[start:end]
+                break
         
-        # Check for comma-separated location parts (likely address)
-        comma_parts = message.split(',')
-        if len(comma_parts) >= 2:
-            return True
+        # Pattern: "email X" or "email is X"
+        email_pattern = r'e?mail\s+(?:is\s+)?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+        match = re.search(email_pattern, msg_lower)
+        if match:
+            start, end = match.span(1)
+            positions['email'] = message[start:end]
         
-        return False
+        # Pattern: "booking on DATE" or "date is DATE"
+        date_patterns = [
+            r'booking\s+(?:on|for)\s+([^,]+?)(?:,|$|\s+address|\s+at)',
+            r'date\s+(?:is\s+)?([^,]+?)(?:,|$|\s+address|\s+at)',
+            r'on\s+((?:\d{1,2}\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4})',
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, msg_lower)
+            if match:
+                start, end = match.span(1)
+                positions['date'] = message[start:end].strip()
+                break
+        
+        # Pattern: "address X" - everything after address keyword until pincode
+        address_patterns = [
+            r'address\s+([A-Za-z\s,]+?)(?:\s+\d{5,6}|$)',
+            r'at\s+([A-Za-z\s,]+?)(?:\s+\d{5,6}|$)',
+        ]
+        for pattern in address_patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                positions['address'] = match.group(1).strip()
+                break
+        
+        # Pattern: standalone pincode (5-6 digits)
+        pincode_pattern = r'\b(\d{5,6})\b'
+        match = re.search(pincode_pattern, message)
+        if match:
+            positions['pincode'] = match.group(1)
+        
+        return positions
+    
+    def _extract_from_text(self, field_name: str, text: str, 
+                        context: Dict, already_extracted: Dict) -> Optional[Dict]:
+        """Extract field from specific text segment"""
+        # For pre-identified text, directly validate and return
+        if field_name == 'name':
+            cleaned = self.name_extractor._clean_name_candidate(text)
+            if cleaned and self.name_extractor._validate_name_candidate(cleaned):
+                return {
+                    'value': cleaned,
+                    'confidence': 'high',
+                    'method': 'position_based',
+                    'original_text': text,
+                    'metadata': {'original': text}
+                }
+        elif field_name == 'phone':
+            # Use phone extractor on the specific text
+            return self._extract_phone_ultimate(text, context, already_extracted)
+        elif field_name == 'email':
+            return self._extract_email_ultimate(text, context)
+        elif field_name == 'date':
+            return self._extract_date_ultimate(text, context)
+        elif field_name == 'address':
+            # For pre-identified address, use LLM directly
+            return self._extract_address_ultimate(text, context, already_extracted)
+        elif field_name == 'pincode':
+            return self._extract_pincode_ultimate(text, context, already_extracted)
+        
+        return None
     
     def _extract_field_enhanced(self, field_name: str, message: str, 
                                 context: Dict, already_extracted: Dict) -> Optional[Dict]:
@@ -255,14 +302,12 @@ class FieldExtractors:
     
     def _extract_phone_ultimate(self, message: str, context: Dict, 
                                 extracted: Dict) -> Optional[Dict]:
-        """Ultimate phone extraction using ALL PhoneExtractor methods"""
-        # Use comprehensive extraction
+        """Ultimate phone extraction"""
         phone_result = self.phone_extractor.extract_comprehensive(message, context)
         
         if not phone_result:
             return None
         
-        # Extract metadata
         metadata = {
             'full_phone': phone_result.get('full_phone'),
             'country_code': phone_result.get('country_code'),
@@ -279,22 +324,17 @@ class FieldExtractors:
         }
     
     def _extract_email_ultimate(self, message: str, context: Dict) -> Optional[Dict]:
-        """Ultimate email extraction using ALL EmailExtractor methods"""
-        # Try explicit first
+        """Ultimate email extraction"""
         email_result = self.email_extractor._extract_explicit_email(message)
         
         if not email_result:
-            # Try standard
             email_result = self.email_extractor._extract_standard_email(message)
         
         if not email_result:
             return None
         
-        # Get provider info
         email_value = email_result.get('email', '')
         provider_info = self.email_extractor.get_provider_info(email_value)
-        
-        # Validate
         validation = self.email_extractor.validate_email(email_value)
         
         metadata = {
@@ -315,8 +355,7 @@ class FieldExtractors:
         }
     
     def _extract_date_ultimate(self, message: str, context: Dict) -> Optional[Dict]:
-        """Ultimate date extraction using ALL DateExtractor methods"""
-        # Use main extract which tries all methods
+        """Ultimate date extraction"""
         date_result = self.date_extractor.extract(message, context)
         
         if not date_result:
@@ -331,7 +370,6 @@ class FieldExtractors:
             'needs_month': date_result.get('needs_month', False)
         }
         
-        # Check if complete
         confidence = date_result.get('confidence', 'medium')
         if date_result.get('needs_year') or date_result.get('needs_day'):
             confidence = 'low'
@@ -346,8 +384,7 @@ class FieldExtractors:
     
     def _extract_country_ultimate(self, message: str, context: Dict, 
                                   extracted: Dict) -> Optional[Dict]:
-        """Ultimate country extraction with inference"""
-        # Try direct extraction
+        """Ultimate country extraction"""
         country_result = self.country_extractor.extract(message, context)
         
         if country_result:
@@ -394,18 +431,14 @@ class FieldExtractors:
     
     def _extract_pincode_ultimate(self, message: str, context: Dict, 
                                   extracted: Dict) -> Optional[Dict]:
-        """Ultimate pincode extraction with country validation"""
-        # Get country if available
+        """Ultimate pincode extraction"""
         country = extracted.get('country')
         if not country and 'phone' in extracted:
             phone_data = extracted['phone']
             if isinstance(phone_data, dict):
                 country = phone_data.get('country')
         
-        # Build context with country
         pincode_context = {**context, 'country': country} if country else context
-        
-        # Extract pincode
         pincode_result = self.pincode_extractor.extract(message, pincode_context)
         
         if not pincode_result:
@@ -429,32 +462,27 @@ class FieldExtractors:
     
     def _extract_name_ultimate(self, message: str, context: Dict, 
                                extracted: Dict) -> Optional[Dict]:
-        """
-        Ultimate name extraction with ALL methods
-        FIXED: Don't extract if message contains location names
-        """
-        # CRITICAL FIX: Don't extract name if message looks like an address
+        """Ultimate name extraction - avoid location names"""
         msg_lower = message.lower()
         
-        # List of location indicators
+        # CRITICAL: Skip if message contains location names
         location_indicators = [
             'india', 'nepal', 'pakistan', 'bangladesh', 'dubai',
             'mumbai', 'delhi', 'pune', 'bangalore', 'kathmandu',
-            'karachi', 'dhaka', 'lahore'
+            'karachi', 'dhaka', 'lahore', 'baner'
         ]
         
-        # If message contains location names, don't treat as name
         for location in location_indicators:
             if location in msg_lower:
                 logger.info(f"⏭️ Skipping name extraction (message contains location: {location})")
                 return None
         
-        # If message has commas (likely address format), don't treat as name
+        # Skip if message has commas (address format)
         if ',' in message:
-            logger.info(f"⏭️ Skipping name extraction (message has commas, likely address)")
+            logger.info(f"⏭️ Skipping name extraction (message has commas)")
             return None
         
-        # Try all extraction methods
+        # Try extraction methods
         all_methods = [
             ('explicit', self.name_extractor._extract_explicit_name),
             ('with_title', self.name_extractor._extract_name_with_title),
@@ -467,10 +495,8 @@ class FieldExtractors:
             try:
                 name = method(message)
                 if name:
-                    # Clean and validate
                     cleaned = self.name_extractor._clean_name_candidate(name)
                     if cleaned and self.name_extractor._validate_name_candidate(cleaned):
-                        # Additional check: name shouldn't be a known city
                         if cleaned.lower() in location_indicators:
                             continue
                         
@@ -487,68 +513,149 @@ class FieldExtractors:
         return None
     
     def _extract_address_ultimate(self, message: str, context: Dict, 
-                                  extracted: Dict) -> Optional[Dict]:
-        """Ultimate address extraction with aggressive cleaning"""
-        # Clean message by removing ALL other fields
-        cleaned_message = message
+                                extracted: Dict) -> Optional[Dict]:
+        """Address extraction using LLM only - clean version"""
         
-        # Remove extracted fields
-        for field_name, value in extracted.items():
-            if field_name != 'address':
-                cleaned_message = self._remove_field_value(cleaned_message, value)
+        logger.info(f"🤖 Using LLM to extract address from: '{message[:100]}...'")
         
-        # Use AddressExtractor with cleaned message
-        address_context = {**context, **extracted}
-        address_result = self.address_extractor.extract(cleaned_message, address_context)
-        
-        if not address_result:
+        try:
+            # FIXED IMPORT PATH - adjust based on your project structure
+            try:
+                from ..extractors.llm_address_extractor import extract_address_with_llm
+            except ImportError:
+                try:
+                    from agent.extractors.llm_address_extractor import extract_address_with_llm
+                except ImportError:
+                    # Try relative import from same directory
+                    from .llm_address_extractor import extract_address_with_llm
+            
+            # CRITICAL FIX: Use original message from context, not the cleaned one
+            original_message = context.get('original_message', message)
+            logger.info(f"🤖 Using ORIGINAL message for LLM: '{original_message[:100]}...'")
+            
+            # Create context with already extracted fields
+            llm_context = {}
+            if extracted:
+                # Convert complex objects to simple strings for LLM
+                for field, value in extracted.items():
+                    if field != 'address':
+                        if isinstance(value, dict):
+                            # Handle phone dict
+                            if 'full_phone' in value:
+                                llm_context[field] = value['full_phone']
+                            elif 'formatted' in value:
+                                llm_context[field] = value['formatted']
+                            else:
+                                llm_context[field] = str(value)
+                        else:
+                            llm_context[field] = str(value)
+            
+            # IMPORTANT: Use original message for LLM
+            llm_result = extract_address_with_llm(original_message, llm_context)
+            
+            if llm_result and llm_result.get('found'):
+                address = llm_result.get('address')
+                logger.info(f"✅ LLM found address: {address}")
+                
+                return {
+                    'value': address,
+                    'confidence': llm_result.get('confidence', 'medium'),
+                    'method': 'llm',
+                    'original_text': address,
+                    'metadata': {
+                        'llm_extracted': True,
+                        'model': llm_result.get('model', 'llama-3.1-8b-instant')
+                    }
+                }
+            
+            # Fallback: Try regex on ORIGINAL message
+            logger.info("🤖 LLM failed, trying regex on original message...")
+            
+            address_patterns = [
+                r'address\s+is\s+([A-Za-z0-9\s,\.]+?)(?:\s+\d{5,6})',
+                r'address\s+([A-Za-z0-9\s,\.]+?)(?:\s+\d{5,6})',
+                r'at\s+([A-Za-z][A-Za-z\s,\.]+?)(?:\s+\d{5,6})',
+                r'location\s+([A-Za-z][A-Za-z\s,\.]+?)(?:\s+\d{5,6})',
+            ]
+            
+            for pattern in address_patterns:
+                match = re.search(pattern, original_message, re.IGNORECASE)
+                if match:
+                    address = match.group(1).strip()
+                    # Clean up
+                    address = re.sub(r'\s+', ' ', address)
+                    if len(address) >= 3:
+                        logger.info(f"✅ Regex found address: {address}")
+                        return {
+                            'value': address,
+                            'confidence': 'medium',
+                            'method': 'regex_fallback',
+                            'original_text': address,
+                            'metadata': {'regex_extracted': True}
+                        }
+            
+            # No address found
+            logger.info(f"❌ No address found in message")
             return None
-        
-        address_value = address_result.get('address')
-        
-        # Additional validation
-        if not address_value or len(address_value) < 2:
+            
+        except ImportError as ie:
+            logger.error(f"❌ Could not import LLM address extractor: {ie}")
+            logger.error(f"❌ Make sure llm_address_extractor.py is in the correct location")
+            
+            # FALLBACK: Use regex extraction directly
+            logger.info("🔄 Using fallback regex extraction...")
+            original_message = context.get('original_message', message)
+            
+            address_patterns = [
+                r'address\s+is\s+([A-Za-z0-9\s,\.]+?)(?:\s+\d{5,6})',
+                r'address\s+([A-Za-z0-9\s,\.]+?)(?:\s+\d{5,6})',
+                r'at\s+([A-Za-z][A-Za-z\s,\.]+?)(?:\s+\d{5,6})',
+                r'location\s+([A-Za-z][A-Za-z\s,\.]+?)(?:\s+\d{5,6})',
+            ]
+            
+            for pattern in address_patterns:
+                match = re.search(pattern, original_message, re.IGNORECASE)
+                if match:
+                    address = match.group(1).strip()
+                    address = re.sub(r'\s+', ' ', address)
+                    if len(address) >= 3:
+                        logger.info(f"✅ Regex fallback found address: {address}")
+                        return {
+                            'value': address,
+                            'confidence': 'medium',
+                            'method': 'regex_fallback',
+                            'original_text': address,
+                            'metadata': {'regex_extracted': True}
+                        }
+            
             return None
-        
-        metadata = {
-            'parts': address_result.get('parts', []),
-            'cleaned_from': message
-        }
-        
-        return {
-            'value': address_value,
-            'confidence': address_result.get('confidence', 'medium'),
-            'method': address_result.get('method', 'cleaned'),
-            'original_text': address_value,
-            'metadata': metadata
-        }
+            
+        except Exception as e:
+            logger.error(f"❌ LLM extraction error: {e}", exc_info=True)
+            return None
     
     def _build_enhanced_context(self, message: str, intent: BookingIntent, 
                                 context: Dict) -> Dict:
-        """Build enhanced context for extraction"""
+        """Build enhanced context"""
         enhanced = {}
         
-        # Add existing context
         if context:
             enhanced.update(context)
         
-        # Add intent fields
         if intent:
             for field in ['name', 'email', 'phone', 'date', 'address', 'pincode', 'country']:
                 value = getattr(intent, field, None)
                 if value:
                     enhanced[field] = value
         
-        # Add message
         enhanced['original_message'] = message
         
         return enhanced
     
     def _infer_missing_fields(self, extracted: Dict, context: Dict) -> Dict:
-        """Infer missing fields from extracted ones"""
+        """Infer missing fields"""
         inferred = {}
         
-        # Infer country from phone
         if 'country' not in extracted and 'phone' in extracted:
             phone_data = extracted['phone']
             if isinstance(phone_data, dict) and phone_data.get('country'):
@@ -558,7 +665,6 @@ class FieldExtractors:
                     'source': 'phone'
                 }
         
-        # Infer country from pincode
         if 'country' not in extracted and 'country' not in inferred and 'pincode' in extracted:
             pincode_value = extracted['pincode']
             if isinstance(pincode_value, dict):
@@ -576,10 +682,9 @@ class FieldExtractors:
         return inferred
     
     def _cross_validate_fields(self, extracted: Dict) -> Dict:
-        """Cross-validate extracted fields for consistency"""
+        """Cross-validate extracted fields"""
         validations = {}
         
-        # Validate phone-country consistency
         if 'phone' in extracted and 'country' in extracted:
             phone_data = extracted['phone']
             country = extracted['country']
@@ -592,7 +697,6 @@ class FieldExtractors:
                         'error': f"Country '{country}' conflicts with phone country '{phone_country}'"
                     }
         
-        # Validate pincode-country consistency
         if 'pincode' in extracted and 'country' in extracted:
             pincode_value = str(extracted['pincode'])
             country = extracted['country']
@@ -604,7 +708,6 @@ class FieldExtractors:
                     'error': f"Pincode '{pincode_value}' invalid for country '{country}'"
                 }
         
-        # Validate email format
         if 'email' in extracted:
             email = extracted['email']
             validation = self.email_extractor.validate_email(email)
@@ -617,18 +720,15 @@ class FieldExtractors:
         return validations
     
     def _post_process_fields(self, extracted: Dict) -> Dict:
-        """Post-process and clean extracted fields"""
+        """Post-process fields"""
         processed = {}
         
         for field, value in extracted.items():
             if field == 'name' and isinstance(value, str):
-                # Capitalize name
                 processed[field] = ' '.join([w.capitalize() for w in value.split()])
             elif field == 'email' and isinstance(value, str):
-                # Lowercase email
                 processed[field] = value.lower()
             elif field == 'address' and isinstance(value, str):
-                # Clean address
                 processed[field] = re.sub(r'\s+', ' ', value).strip()
             else:
                 processed[field] = value
@@ -636,7 +736,7 @@ class FieldExtractors:
         return processed
     
     def _calculate_overall_confidence(self, details: Dict) -> str:
-        """Calculate overall extraction confidence"""
+        """Calculate confidence"""
         if not details:
             return 'low'
         
@@ -666,16 +766,14 @@ class FieldExtractors:
     
     def _find_missing_required_fields(self, intent: BookingIntent, 
                                       extracted: Dict) -> List[str]:
-        """Find missing required fields"""
+        """Find missing fields"""
         required = ['name', 'email', 'phone', 'date', 'address']
         missing = []
         
         for field in required:
-            # Check extracted
             if field in extracted and extracted[field]:
                 continue
             
-            # Check intent
             if getattr(intent, field, None):
                 continue
             
@@ -685,7 +783,7 @@ class FieldExtractors:
     
     def _generate_suggestions(self, extracted: Dict, missing: List[str], 
                              warnings: List[str]) -> List[str]:
-        """Generate helpful suggestions for user"""
+        """Generate suggestions"""
         suggestions = []
         
         if missing:
@@ -706,21 +804,17 @@ class FieldExtractors:
         original_text = field_result.get('original_text', '')
         
         if original_text:
-            # Remove the text
             message = re.sub(re.escape(original_text), ' ', message, flags=re.IGNORECASE)
         
-        # Also try removing the value itself
         value = field_result.get('value')
         if value:
             if isinstance(value, dict):
-                # For phone, email, etc.
                 for key in ['full_phone', 'phone', 'email', 'formatted']:
                     if key in value:
                         message = re.sub(re.escape(str(value[key])), ' ', message, flags=re.IGNORECASE)
             elif isinstance(value, str):
                 message = re.sub(re.escape(value), ' ', message, flags=re.IGNORECASE)
         
-        # Clean whitespace
         return re.sub(r'\s+', ' ', message).strip()
     
     def _remove_field_value(self, message: str, value: Any) -> str:

@@ -8,6 +8,8 @@ from .email_extractor import EmailExtractor
 from .date_extractor import DateExtractor
 from .name_extractor import NameExtractor
 from .address_extractor import AddressExtractor
+from .llm_address_extractor import LLMAddressExtractor
+
 from .pincode_extractor import PincodeExtractor
 from .country_extractor import CountryExtractor
 
@@ -19,5 +21,6 @@ __all__ = [
     "NameExtractor",
     "AddressExtractor",
     "PincodeExtractor",
-    "CountryExtractor"
+    "CountryExtractor",
+    "LLMAddressExtractor"
 ]
