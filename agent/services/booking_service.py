@@ -34,27 +34,34 @@ class BookingService:
         """Create booking data from memory"""
         phone_country = memory.intent.phone_country
         
+        # ✅ Extract phone string from memory.intent.phone (could be dict)
+        phone_obj = memory.intent.phone
+        
         # Infer phone country if not set
-        if not phone_country and memory.intent.phone and memory.intent.phone.startswith('+'):
-            phone_code_map = {
-                '91': 'India', '977': 'Nepal', '92': 'Pakistan',
-                '880': 'Bangladesh', '971': 'Dubai'
-            }
+        if not phone_country and phone_obj:
+            # First extract phone string from phone_obj
+            phone_str = self._extract_phone_string(phone_obj)
             
-            for code, country in phone_code_map.items():
-                if memory.intent.phone.startswith(f'+{code}'):
-                    phone_country = country
-                    break
+            if phone_str and phone_str.startswith('+'):
+                phone_code_map = {
+                    '91': 'India', '977': 'Nepal', '92': 'Pakistan',
+                    '880': 'Bangladesh', '971': 'Dubai'
+                }
+                
+                for code, country in phone_code_map.items():
+                    if phone_str.startswith(f'+{code}'):
+                        phone_country = country
+                        break
         
         if not phone_country:
             phone_country = memory.intent.service_country or "India"
         
         # Format phone
-        formatted_phone = self._format_phone_for_api(memory.intent.phone, phone_country)
+        formatted_phone = self._format_phone_for_api(phone_obj, phone_country)
         
         if not formatted_phone.startswith('+'):
-            logger.error(f"Phone missing country code: {memory.intent.phone}")
-            digits = re.sub(r'\D', '', memory.intent.phone or "")
+            logger.error(f"Phone missing country code: {phone_obj}")
+            digits = re.sub(r'\D', '', formatted_phone or "")
             if len(digits) >= 10:
                 formatted_phone = f"+91{digits[-10:]}"
             else:
@@ -82,6 +89,26 @@ class BookingService:
             "source": "agent_chat"
         }
     
+    def _extract_phone_string(self, phone_obj) -> str:
+        """Extract phone string from phone object (string or dict)"""
+        if not phone_obj:
+            return ""
+            
+        if isinstance(phone_obj, dict):
+            # Try different keys that might contain the phone number
+            phone_str = phone_obj.get('full_phone') or phone_obj.get('formatted') or phone_obj.get('phone', '')
+            
+            # If it's a dict with phone details, construct the full phone
+            if not phone_str and 'country_code' in phone_obj and 'phone' in phone_obj:
+                country_code = str(phone_obj.get('country_code', '')).replace('+', '').strip()
+                phone_num = str(phone_obj.get('phone', '')).strip()
+                if country_code and phone_num:
+                    phone_str = f"+{country_code}{phone_num}"
+        else:
+            phone_str = str(phone_obj)
+        
+        return phone_str
+    
     def validate_booking_completeness(self, intent) -> bool:
         """Validate booking has all required fields"""
         return intent.is_complete()
@@ -102,9 +129,14 @@ class BookingService:
         try:
             whatsapp_msg = self.generate_whatsapp_message(booking_data, language)
             
-            whatsapp_phone = phone
+            # ✅ Ensure phone is a string
+            phone_str = phone
+            if isinstance(phone, dict):
+                phone_str = self._extract_phone_string(phone)
+            
+            whatsapp_phone = phone_str
             if not whatsapp_phone.startswith('whatsapp:'):
-                whatsapp_phone = f"whatsapp:{phone}"
+                whatsapp_phone = f"whatsapp:{phone_str}"
             
             self.twilio_client.messages.create(
                 from_=self.whatsapp_from,
@@ -112,7 +144,7 @@ class BookingService:
                 body=whatsapp_msg
             )
             
-            logger.info(f"✅ Confirmation WhatsApp sent to {phone}")
+            logger.info(f"✅ Confirmation WhatsApp sent to {phone_str}")
             return True
             
         except Exception as e:
@@ -190,19 +222,25 @@ JinniChirag चुनने के लिए धन्यवाद! 💄✨"""
         
         return "\n".join(summary_parts)
     
-    def _format_phone_for_api(self, phone: str, country: str = "India") -> str:
-        """Format phone for API (add country code)"""
-        if not phone:
+    def _format_phone_for_api(self, phone_obj, country: str = "India") -> str:
+        """Format phone for API (add country code) - handles both string and dict"""
+        if not phone_obj:
             return ""
         
-        if phone.startswith('+'):
-            digits = re.sub(r'\D', '', phone)
+        # ✅ Extract phone string first
+        phone_str = self._extract_phone_string(phone_obj)
+        
+        if not phone_str:
+            return ""
+        
+        if phone_str.startswith('+'):
+            digits = re.sub(r'\D', '', phone_str)
             if len(digits) >= 10:
-                return phone
+                return phone_str
             else:
                 return ""
         
-        digits = re.sub(r'\D', '', phone)
+        digits = re.sub(r'\D', '', phone_str)
         
         if len(digits) < 10:
             return ""

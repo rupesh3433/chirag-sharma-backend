@@ -67,6 +67,8 @@ class DateExtractor(BaseExtractor):
         'आज', 'उद्या', 'परवा'  # Marathi
     }
     
+
+
     def extract(self, message: str, context: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
         """Extract date from message with comprehensive error handling"""
         if not message or len(message.strip()) == 0:
@@ -90,6 +92,8 @@ class DateExtractor(BaseExtractor):
             ('natural_language', self._extract_natural_language_date),   # "next friday"
             ('partial', self._extract_partial_date),                     # "2feb" (no year)
             ('year_month', self._extract_year_month),                    # "Feb 2026" (just month/year)
+            ('ambiguous', self._extract_ambiguous_date),                 # "2 2026" (NEW - add this!)
+            ('day_year', self._extract_day_year),
         ]
         
         for method_name, method in extraction_methods:
@@ -327,6 +331,8 @@ class DateExtractor(BaseExtractor):
             (r'\b(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2})\b', 'dmy_short'),
             # DD/MM (no year)
             (r'\b(\d{1,2})[/\-\.](\d{1,2})\b(?![/\-\.])', 'dm_partial'),
+            # YYYY/MM/DD
+            (r'\b(\d{4})[/\-\.](\d{1,2})[/\-\.](\d{1,2})\b', 'ymd'),
         ]
         
         now = datetime.now()
@@ -338,17 +344,20 @@ class DateExtractor(BaseExtractor):
                     if format_type == 'dmy':
                         first, second, year = map(int, match.groups())
                         
-                        # Determine if DD/MM or MM/DD
-                        if first > 12 and second <= 12:
-                            day, month = first, second
-                        elif second > 12 and first <= 12:
-                            day, month = second, first
-                        elif first <= 12 and second <= 12:
-                            # Ambiguous - default to DD/MM (international)
-                            day, month = first, second
-                        else:
+                        # For India context, assume first is day, second is month
+                        day, month = first, second
+                        
+                        # Validate day-month combination
+                        if not (1 <= day <= 31):
+                            # Try swapping if day is invalid
+                            if 1 <= first <= 12 and 1 <= second <= 31:
+                                day, month = second, first
+                            else:
+                                continue
+                        
+                        if not (1 <= month <= 12):
                             continue
-                    
+                        
                     elif format_type == 'dmy_short':
                         first, second, year_short = map(int, match.groups())
                         
@@ -361,24 +370,33 @@ class DateExtractor(BaseExtractor):
                         if year < current_year - 20:
                             year += 100
                         
-                        # Determine day/month
-                        if first > 12 and second <= 12:
-                            day, month = first, second
-                        elif second > 12 and first <= 12:
-                            day, month = second, first
-                        else:
-                            day, month = first, second
+                        # Assume DD/MM format for India
+                        day, month = first, second
+                        
+                        # Validate
+                        if not (1 <= month <= 12):
+                            # Try swapping
+                            if 1 <= first <= 12 and 1 <= second <= 31:
+                                day, month = second, first
+                            else:
+                                continue
+                    
+                    elif format_type == 'ymd':
+                        year, month, day = map(int, match.groups())
                     
                     elif format_type == 'dm_partial':
                         first, second = map(int, match.groups())
                         
-                        # Determine day/month
-                        if first > 12 and second <= 12:
-                            day, month = first, second
-                        elif second > 12 and first <= 12:
-                            day, month = second, first
-                        else:
-                            day, month = first, second
+                        # Assume DD/MM format for India
+                        day, month = first, second
+                        
+                        # Validate
+                        if not (1 <= month <= 12):
+                            # Try swapping
+                            if 1 <= first <= 12 and 1 <= second <= 31:
+                                day, month = second, first
+                            else:
+                                continue
                         
                         # Assume year
                         year = now.year
@@ -604,6 +622,125 @@ class DateExtractor(BaseExtractor):
                     'needs_day': True,
                     'original': match.group(0)
                 }
+            except (ValueError, OverflowError):
+                continue
+        
+        return None
+
+
+    def _extract_day_year(self, message: str) -> Optional[Dict]:
+        """Extract patterns like "2 2026" (day + year, no month)"""
+        patterns = [
+            # "2 2026" - day + year (ambiguous month)
+            r'\b(\d{1,2})\s+(\d{4})\b',
+            # "2nd 2026" - with ordinal
+            r'\b(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})\b',
+        ]
+        
+        msg_lower = message.lower()
+        now = datetime.now()
+        
+        for pattern in patterns:
+            match = re.search(pattern, msg_lower)
+            if not match:
+                continue
+            
+            try:
+                first, year = map(int, match.groups())
+                
+                # Validate year
+                if not self._is_valid_year(year):
+                    continue
+                
+                # Check if first could be a day (1-31) or month (1-12)
+                # This is ambiguous - we need to decide based on context
+                # For booking, it's more likely to be day
+                
+                # Default to day (with current month)
+                day = first
+                month = now.month
+                
+                # Check if day is valid for current month
+                if not self._is_valid_day_for_month(year, month, day):
+                    # Try next month
+                    month = (now.month % 12) + 1
+                    if not self._is_valid_day_for_month(year, month, day):
+                        continue
+                
+                # If in past, adjust year
+                test_date = datetime(year, month, day)
+                if test_date < now:
+                    # Already checked future month, try next year
+                    year += 1
+                    test_date = datetime(year, month, day)
+                
+                date_obj = test_date
+                
+                return {
+                    'date': date_obj.strftime('%Y-%m-%d'),
+                    'date_obj': date_obj,
+                    'formatted': date_obj.strftime('%d %b %Y'),
+                    'confidence': 'medium',
+                    'method': 'day_year',
+                    'needs_month': True,  # We guessed month
+                    'original': match.group(0),
+                    'needs_year': False
+                }
+                
+            except (ValueError, OverflowError):
+                continue
+        
+        return None
+
+
+    def _extract_ambiguous_date(self, message: str) -> Optional[Dict]:
+        """Handle ambiguous cases like '2 2026' (could be day/year or month/year)"""
+        patterns = [
+            # "2 2026" - ambiguous: could be day-year or month-year
+            r'\b(\d{1,2})\s+(\d{4})\b',
+        ]
+        
+        msg_lower = message.lower()
+        now = datetime.now()
+        
+        for pattern in patterns:
+            match = re.search(pattern, msg_lower)
+            if not match:
+                continue
+            
+            try:
+                first, year = map(int, match.groups())
+                
+                # Check if valid year
+                if not self._is_valid_year(year):
+                    continue
+                
+                # This is ambiguous - we need more context
+                # Could be "February 2026" (month/year) or "2nd 2026" (day/month/year)
+                
+                # Default to treating as month if <= 12
+                if first <= 12:
+                    # Could be month
+                    month = first
+                    # Use 1st of month
+                    day = 1
+                    date_obj = datetime(year, month, day)
+                    
+                    return {
+                        'date': date_obj.strftime('%Y-%m-%d'),
+                        'date_obj': date_obj,
+                        'formatted': date_obj.strftime('%b %Y'),
+                        'confidence': 'low',
+                        'method': 'ambiguous_date',
+                        'needs_year': False,
+                        'needs_day': True,  # IMPORTANT: We need the day!
+                        'original': match.group(0)
+                    }
+                else:
+                    # First > 12, could be day but missing month
+                    # Not enough info
+                    return None
+                    
             except (ValueError, OverflowError):
                 continue
         

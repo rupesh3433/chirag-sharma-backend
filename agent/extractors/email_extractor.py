@@ -140,6 +140,60 @@ class EmailExtractor(BaseExtractor):
         best_email, confidence = valid_emails[0]
         
         return self._build_email_result(best_email, confidence, 'pattern_match')
+        
+
+    def _extract_ambiguous_date(self, message: str) -> Optional[Dict]:
+        """Handle ambiguous cases like '2 2026' (could be day/year or month/year)"""
+        patterns = [
+            # "2 2026" - ambiguous: could be day-year or month-year
+            r'\b(\d{1,2})\s+(\d{4})\b',
+        ]
+        
+        msg_lower = message.lower()
+        now = datetime.now()
+        
+        for pattern in patterns:
+            match = re.search(pattern, msg_lower)
+            if not match:
+                continue
+            
+            try:
+                first, year = map(int, match.groups())
+                
+                # Check if valid year
+                if not self._is_valid_year(year):
+                    continue
+                
+                # This is ambiguous - we need more context
+                # Could be "February 2026" (month/year) or "2nd 2026" (day/month/year)
+                
+                # Default to treating as month if <= 12
+                if first <= 12:
+                    # Could be month
+                    month = first
+                    # Use 1st of month
+                    day = 1
+                    date_obj = datetime(year, month, day)
+                    
+                    return {
+                        'date': date_obj.strftime('%Y-%m-%d'),
+                        'date_obj': date_obj,
+                        'formatted': date_obj.strftime('%b %Y'),
+                        'confidence': 'low',
+                        'method': 'ambiguous_date',
+                        'needs_year': False,
+                        'needs_day': True,  # IMPORTANT: We need the day!
+                        'original': match.group(0)
+                    }
+                else:
+                    # First > 12, could be day but missing month
+                    # Not enough info
+                    return None
+                    
+            except (ValueError, OverflowError):
+                continue
+        
+        return None
     
     def _find_email_patterns(self, message: str) -> List[str]:
         """Find all email patterns in message"""

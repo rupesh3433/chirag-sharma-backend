@@ -4,6 +4,7 @@ OTP Service - Enhanced with proper generation, storage, and verification
 
 import secrets
 import logging
+import re
 from datetime import datetime, timedelta
 from random import randint
 from typing import Dict, Optional, Tuple, Any
@@ -52,7 +53,7 @@ class OTPService:
         logger.debug(f"Generated booking ID: {booking_id[:8]}...")
         return booking_id
     
-    def store_otp_data(self, booking_id: str, otp: str, phone: str, 
+    def store_otp_data(self, booking_id: str, otp: str, phone, 
                       booking_data: Dict, language: str) -> None:
         """
         Store OTP with expiry and booking data
@@ -60,7 +61,7 @@ class OTPService:
         Args:
             booking_id: Unique booking identifier
             otp: 6-digit OTP
-            phone: User's phone number
+            phone: User's phone number (can be string or dict)
             booking_data: Complete booking information
             language: User's language preference
         """
@@ -82,12 +83,12 @@ class OTPService:
             f"expires at {expires_at.strftime('%Y-%m-%d %H:%M:%S')}"
         )
     
-    def send_otp(self, phone: str, otp: str, language: str = "en") -> bool:
+    def send_otp(self, phone, otp: str, language: str = "en") -> bool:
         """
         Send OTP via WhatsApp using Twilio
         
         Args:
-            phone: Phone number (with country code)
+            phone: Phone number (with country code) - can be string or dict
             otp: 6-digit OTP to send
             language: Language for OTP message
             
@@ -100,8 +101,15 @@ class OTPService:
             return True
         
         try:
+            # ✅ Extract phone string from phone object (could be string or dict)
+            phone_str = self._extract_phone_string(phone)
+            
+            if not phone_str:
+                logger.error(f"❌ No valid phone found in: {phone}")
+                return False
+            
             # Ensure phone has whatsapp: prefix
-            whatsapp_phone = f"whatsapp:{phone}" if not phone.startswith("whatsapp:") else phone
+            whatsapp_phone = f"whatsapp:{phone_str}" if not phone_str.startswith("whatsapp:") else phone_str
             
             # Format from number
             from_whatsapp = f"whatsapp:{self.from_number}" if not self.from_number.startswith("whatsapp:") else self.from_number
@@ -116,12 +124,66 @@ class OTPService:
                 body=message
             )
             
-            logger.info(f"✅ OTP sent to {phone} (SID: {result.sid})")
+            logger.info(f"✅ OTP sent to {phone_str} (SID: {result.sid})")
             return True
             
         except Exception as e:
             logger.error(f"❌ Failed to send OTP to {phone}: {e}")
             return False
+    
+    def _extract_phone_string(self, phone) -> str:
+        """
+        Extract phone string from phone object (string or dict)
+        
+        Args:
+            phone: Phone object (string or dict)
+            
+        Returns:
+            Formatted phone string with country code
+        """
+        if not phone:
+            return ""
+            
+        if isinstance(phone, dict):
+            # Try different keys that might contain the phone number
+            phone_str = phone.get('full_phone') or phone.get('formatted') or phone.get('phone', '')
+            
+            # If it's a dict with phone details, construct the full phone
+            if not phone_str and 'country_code' in phone and 'phone' in phone:
+                country_code = str(phone.get('country_code', '')).replace('+', '').strip()
+                phone_num = str(phone.get('phone', '')).strip()
+                if country_code and phone_num:
+                    phone_str = f"+{country_code}{phone_num}"
+        else:
+            phone_str = str(phone)
+        
+        # Clean and validate the phone string
+        if not phone_str:
+            return ""
+        
+        # Remove any whitespace
+        phone_str = phone_str.strip()
+        
+        # Remove non-digit characters except plus
+        digits = re.sub(r'[^\d+]', '', phone_str)
+        
+        # Ensure it starts with +
+        if digits and not digits.startswith('+'):
+            # Check if it has a country code in another format
+            if phone_str.startswith('whatsapp:'):
+                phone_str = phone_str.replace('whatsapp:', '')
+                digits = re.sub(r'[^\d+]', '', phone_str)
+            
+            # Add default India code if no country code
+            if digits and not digits.startswith('+'):
+                # Check if it already has 91 as country code
+                if digits.startswith('91') and len(digits) >= 12:
+                    phone_str = f"+{digits}"
+                else:
+                    # Add +91 for India
+                    phone_str = f"+91{digits}"
+        
+        return phone_str
     
     def verify_otp(self, booking_id: str, user_otp: str) -> Dict[str, Any]:
         """
@@ -269,10 +331,12 @@ class OTPService:
         sent = self.send_otp(phone, new_otp, language)
         
         if sent:
-            logger.info(f"✅ NEW OTP generated and sent to {phone}")
+            # Format phone for display
+            phone_display = self._format_phone_for_display(phone)
+            logger.info(f"✅ NEW OTP generated and sent to {phone_display}")
             return {
                 "success": True,
-                "phone": phone,
+                "phone": phone_display,
                 "new_otp_generated": True,
                 "resent_at": now.isoformat()
             }
@@ -383,3 +447,36 @@ class OTPService:
         }
         
         return messages.get(language, messages["en"])
+    
+    def _format_phone_for_display(self, phone) -> str:
+        """
+        Format phone number for display (masked for privacy)
+        
+        Args:
+            phone: Phone object (string or dict)
+            
+        Returns:
+            Formatted and masked phone string
+        """
+        if not phone:
+            return "[phone number]"
+        
+        # Extract phone string
+        phone_str = ""
+        if isinstance(phone, dict):
+            phone_str = phone.get('formatted') or phone.get('full_phone') or str(phone)
+        else:
+            phone_str = str(phone)
+        
+        # Mask the phone for privacy
+        digits = re.sub(r'\D', '', phone_str)
+        
+        if len(digits) >= 10:
+            if phone_str.startswith('+'):
+                # Keep country code visible, mask middle digits
+                country_code = phone_str[:phone_str.find(digits[:2]) + 2]
+                return f"{country_code}****{digits[-4:]}"
+            else:
+                return f"+XX{digits[:2]}****{digits[-4:]}"
+        
+        return phone_str

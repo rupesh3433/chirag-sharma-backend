@@ -207,28 +207,62 @@ class CountryExtractor(BaseExtractor):
         
         return None
     
-    def infer_from_phone(self, phone: str) -> Optional[str]:
-        """Infer country from phone number"""
-        # Clean phone number
-        phone_clean = re.sub(r'[^\d+]', '', phone)
+    def infer_from_phone(self, phone) -> Optional[str]:
+        """
+        Infer country from phone number
+        Handles both dict and string phone objects
+        """
+        if not phone:
+            return None
         
-        # Extract country code
+        # Extract phone string from dict if needed
+        phone_str = phone
+        if isinstance(phone, dict):
+            # Try different keys to get the phone string
+            phone_str = (phone.get('full_phone') or 
+                        phone.get('phone') or 
+                        phone.get('formatted') or 
+                        str(phone))
+        
+        # Ensure it's a string
+        if not isinstance(phone_str, str):
+            phone_str = str(phone_str)
+        
+        # Clean phone number - remove all non-digit and non-plus characters
+        phone_clean = re.sub(r'[^\d+]', '', phone_str)
+        
+        if not phone_clean:
+            return None
+        
+        # Extract country code and match
         if phone_clean.startswith('+'):
             # Try to match country codes
             for country, patterns in self.COUNTRY_PATTERNS.items():
                 for code in patterns['phone_codes']:
                     if phone_clean.startswith(f'+{code}'):
                         return country
+        else:
+            # Try without + prefix
+            for country, patterns in self.COUNTRY_PATTERNS.items():
+                for code in patterns['phone_codes']:
+                    if phone_clean.startswith(code):
+                        return country
         
         return None
     
     def _infer_from_pincode(self, pincode: str) -> Optional[str]:
         """Infer country from pincode pattern"""
-        length = len(pincode)
+        if not pincode:
+            return None
+        
+        # Ensure pincode is string
+        pincode_str = str(pincode) if not isinstance(pincode, str) else pincode
+        
+        length = len(pincode_str)
         
         if length == 6:
             # Could be India
-            if pincode[0] in '12345678':
+            if pincode_str[0] in '12345678':
                 return 'India'
         elif length == 5:
             # Could be Nepal, Pakistan, or Dubai
@@ -298,7 +332,8 @@ class CountryExtractor(BaseExtractor):
         
         # Validate pincode
         if pincode:
-            if len(pincode) != country_info['pincode_length']:
+            pincode_str = str(pincode) if not isinstance(pincode, str) else pincode
+            if len(pincode_str) != country_info['pincode_length']:
                 conflicts.append(f"Pincode length should be {country_info['pincode_length']}")
         
         # Validate address

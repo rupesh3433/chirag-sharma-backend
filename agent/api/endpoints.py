@@ -23,7 +23,8 @@ class AgentEndpoints:
         self.memory_service = orchestrator.memory_service
         
         logger.info("AgentEndpoints initialized")
-    
+        
+
     async def chat(self, request: AgentChatRequest) -> AgentChatResponse:
         """Main chat endpoint"""
         try:
@@ -38,6 +39,22 @@ class AgentEndpoints:
                 session_id=request.session_id,
                 language=request.language
             )
+            
+            # Handle None result
+            if result is None:
+                logger.warning(f"Orchestrator returned None for message: {request.message}")
+                
+                # Create a fallback response
+                fallback_result = {
+                    "reply": "Please provide your booking details.",
+                    "session_id": request.session_id or "error",
+                    "stage": "collecting_details",
+                    "action": "continue",
+                    "missing_fields": [],
+                    "collected_info": {},
+                    "chat_mode": "agent"
+                }
+                result = fallback_result
             
             # Convert to AgentChatResponse
             response = self._build_response(result)

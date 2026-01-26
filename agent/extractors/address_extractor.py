@@ -324,14 +324,14 @@ class AddressExtractor(BaseExtractor):
         return ', '.join(formatted_parts)
     
     def _validate_address(self, address: str) -> bool:
-        """Validate if string is likely an address - RELAXED for city names"""
-        if not address or len(address) < 3:  # Reduced from 10 to 3
+        """Validate if string is likely an address - IMPROVED with strict date checking"""
+        if not address or len(address) < 3:
             return False
         
         addr_lower = address.lower()
         
         # ========================
-        # EXCLUDE DATE PATTERNS
+        # STRICT DATE PATTERN EXCLUSION
         # ========================
         # Month names (English)
         months = [
@@ -340,24 +340,54 @@ class AddressExtractor(BaseExtractor):
             'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'
         ]
         
-        # Common date patterns
+        # Common date patterns (comprehensive)
         date_patterns = [
-            r'\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
-            r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}',
-            r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}',
-            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',
-            r'\d{1,2}\s+\d{4}'  # "15 2025"
+            # DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+            r'\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}',
+            # MM/DD/YYYY, MM-DD-YYYY
+            r'\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}',
+            # YYYY/MM/DD, YYYY-MM-DD
+            r'\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}',
+            # "15 04 2025", "15 april 2025", "april 15 2025"
+            r'\d{1,2}\s+(?:\d{1,2}|\w+)\s+\d{4}',
+            r'(?:\d{1,2}|\w+)\s+\d{1,2}\s+\d{4}',
+            # Month patterns
+            r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}',
+            r'\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*',
+            # Year alone (2024-2030)
+            r'\b(202[4-9]|203[0-9])\b'
         ]
         
-        # Check for date patterns
+        # Check for any date pattern - if found, REJECT as address
+        for pattern in date_patterns:
+            if re.search(pattern, addr_lower):
+                return False
+        
+        # Additional check for month names with year context
         for month in months:
             if month in addr_lower:
-                # Check if it's a date format
-                for pattern in date_patterns:
-                    if re.search(pattern, addr_lower):
-                        return False
+                # Check if month is followed by or preceded by numbers
+                month_pattern = rf'\b{re.escape(month)}\b'
+                if re.search(month_pattern, addr_lower):
+                    # Get context around the month
+                    month_pos = re.search(month_pattern, addr_lower).start()
+                    context = addr_lower[max(0, month_pos-10):min(len(addr_lower), month_pos+15)]
+                    
+                    # Check for date-like patterns in context
+                    context_patterns = [
+                        r'\d{1,2}\s+\w+\s+\d{4}',  # "15 april 2025"
+                        r'\w+\s+\d{1,2}\s+\d{4}',  # "april 15 2025"
+                        r'\d{1,2}\s+\w+',          # "15 april"
+                        r'\w+\s+\d{1,2}',          # "april 15"
+                    ]
+                    
+                    for ctx_pattern in context_patterns:
+                        if re.search(ctx_pattern, context):
+                            return False
         
-        # Check for question patterns
+        # ========================
+        # EXCLUDE QUESTION PATTERNS
+        # ========================
         question_starters = [
             "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
             "can you", "could you", "would you", "will you",
@@ -370,7 +400,9 @@ class AddressExtractor(BaseExtractor):
             if addr_lower.startswith(starter):
                 return False
         
-        # Check for social media patterns
+        # ========================
+        # EXCLUDE SOCIAL MEDIA PATTERNS
+        # ========================
         social_patterns = [
             'instagram', 'facebook', 'twitter', 'youtube', 'linkedin',
             'social media', 'follow', 'subscribe', 'channel',
@@ -382,14 +414,13 @@ class AddressExtractor(BaseExtractor):
                 return False
         
         # ========================
-        # NEW: Special handling for city names
+        # SPECIAL HANDLING FOR CITY NAMES
         # ========================
         # Check if it's a known city
         is_city = any(location in addr_lower for location in self.LOCATION_NAMES)
         
         if is_city:
             # For city names only, be more lenient
-            # Check it's not just part of a longer invalid string
             words = address.split()
             if len(words) == 1:
                 # Single word that's a city - accept it
@@ -398,8 +429,8 @@ class AddressExtractor(BaseExtractor):
                 # Short address (like "Delhi", "New Delhi", "South Delhi")
                 # Check if it doesn't contain other invalid patterns
                 invalid_patterns = [
-                    r'\d{10}',  # Phone number
-                    r'\S+@\S+\.\S+',  # Email
+                    r'\d{10,}',          # Phone number
+                    r'\S+@\S+\.\S+',     # Email
                     r'price|cost|how much|fee',  # Price keywords
                 ]
                 for pattern in invalid_patterns:
@@ -408,10 +439,8 @@ class AddressExtractor(BaseExtractor):
                 return True
         
         # ========================
-        # For non-city addresses, apply stricter rules
+        # FOR NON-CITY ADDRESSES
         # ========================
-        parts = [p.strip() for p in address.split(',')]
-        
         # Check for address indicators
         has_indicator = False
         for indicator in self.ADDRESS_INDICATORS[:30]:
@@ -419,21 +448,30 @@ class AddressExtractor(BaseExtractor):
                 has_indicator = True
                 break
         
-        if not has_indicator:
-            # Check for location names (already done above)
-            if not is_city:
-                return False
+        # Check for location names (non-city locations)
+        has_location = any(loc in addr_lower for loc in self.LOCATION_NAMES)
         
-        # Check for reasonable length and content
+        if not has_indicator and not has_location:
+            # Check for number + street pattern
+            if not re.search(r'\d+[,\s]+\w+', address):
+                return False
+            else:
+                has_indicator = True
+        
+        # Check for reasonable length
         words = address.split()
-        if len(words) < 1:  # Reduced from 3
+        if len(words) < 1:
             return False
         
-        # Check for number + street pattern
-        if not is_city and not has_indicator:
-            if re.search(r'\d+[,\s]+\w+', address):
-                has_indicator = True
-            else:
+        # Check for other invalid patterns
+        invalid_patterns = [
+            r'\d{10,}',          # Phone numbers
+            r'\S+@\S+\.\S+',     # Emails
+            r'^\d+$',            # Only numbers
+        ]
+        
+        for pattern in invalid_patterns:
+            if re.search(pattern, addr_lower):
                 return False
         
         return True
