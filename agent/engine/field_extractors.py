@@ -1,7 +1,7 @@
 """
 FIELD EXTRACTOR - MAXIMUM ENHANCED VERSION
 Leverages ALL extractor capabilities for perfect field extraction
-UPDATED: Allows field updates/changes
+FIXED: Proper field extraction order - address should not be confused with name
 """
 
 import re
@@ -26,6 +26,7 @@ class FieldExtractors:
     - Infers missing fields from extracted ones
     - Provides detailed confidence scoring
     - SUPPORTS FIELD UPDATES (allows changing existing fields)
+    - FIXED: Proper extraction order to avoid address/name confusion
     """
     
     def __init__(self):
@@ -40,14 +41,15 @@ class FieldExtractors:
         self.country_extractor = CountryExtractor()
         
         # Extraction priority (order matters!)
+        # FIXED: Only extract fields that are clearly present, don't force extraction
         self.EXTRACTION_ORDER = [
             'email',      # High confidence, clear pattern
             'phone',      # High confidence, contains country info
-            'country',    # Can be inferred from phone/pincode
             'date',       # Medium confidence, multiple formats
             'pincode',    # Medium confidence, needs country context
-            'name',       # Lower confidence, needs cleaning
-            'address',    # Lowest confidence, extract last after cleaning
+            'country',    # Can be inferred from phone/pincode
+            'address',    # Extract address before name to avoid confusion
+            'name',       # Extract name last, after all location data is extracted
         ]
         
         logger.info("🚀 UltraFieldExtractorV2 initialized - MAXIMUM POWER MODE")
@@ -57,6 +59,7 @@ class FieldExtractors:
         """
         ULTIMATE extraction method - uses ALL extractor capabilities
         NOW SUPPORTS FIELD UPDATES - does not skip fields that already exist
+        FIXED: Better field discrimination to avoid address/name confusion
         
         Returns:
             {
@@ -93,13 +96,29 @@ class FieldExtractors:
         # Build enhanced context
         enhanced_context = self._build_enhanced_context(message, intent, context)
         
+        # CRITICAL FIX: Check what field we're currently asking for
+        last_asked_field = enhanced_context.get('last_asked_field')
+        
         # Phase 1: Sequential extraction with cross-referencing
-        # ✅ REMOVED THE SKIP LOGIC - Now always tries to extract
         working_message = message
         
         for field_name in self.EXTRACTION_ORDER:
-            # ✅ NO MORE SKIPPING - Always try to extract
-            # This allows users to update/change existing fields
+            # SMART EXTRACTION: Only extract address if we're asking for address
+            # This prevents address from being confused with name
+            if field_name == 'address' and last_asked_field != 'address':
+                # Skip address extraction unless we specifically asked for it
+                # OR if message clearly contains address indicators
+                if not self._has_clear_address_indicators(working_message):
+                    logger.info(f"⏭️ Skipping address extraction (not asking for address)")
+                    continue
+            
+            # SMART EXTRACTION: Only extract name if we're asking for name
+            # This prevents city names from being confused with person names
+            if field_name == 'name' and last_asked_field != 'name':
+                # Skip name extraction unless we specifically asked for it
+                if intent and intent.name:
+                    logger.info(f"⏭️ Skipping name extraction (already have name)")
+                    continue
             
             # Extract using specialized method
             field_result = self._extract_field_enhanced(
@@ -189,6 +208,29 @@ class FieldExtractors:
         )
         
         return result
+    
+    def _has_clear_address_indicators(self, message: str) -> bool:
+        """Check if message has clear address indicators"""
+        msg_lower = message.lower()
+        
+        # Strong address indicators
+        strong_indicators = [
+            'street', 'road', 'lane', 'avenue', 'house', 'flat', 'apartment',
+            'building', 'floor', 'colony', 'sector', 'area', 'locality',
+            'near', 'beside', 'opposite', 'behind'
+        ]
+        
+        # Check for strong indicators
+        for indicator in strong_indicators:
+            if indicator in msg_lower:
+                return True
+        
+        # Check for comma-separated location parts (likely address)
+        comma_parts = message.split(',')
+        if len(comma_parts) >= 2:
+            return True
+        
+        return False
     
     def _extract_field_enhanced(self, field_name: str, message: str, 
                                 context: Dict, already_extracted: Dict) -> Optional[Dict]:
@@ -387,7 +429,31 @@ class FieldExtractors:
     
     def _extract_name_ultimate(self, message: str, context: Dict, 
                                extracted: Dict) -> Optional[Dict]:
-        """Ultimate name extraction with ALL methods"""
+        """
+        Ultimate name extraction with ALL methods
+        FIXED: Don't extract if message contains location names
+        """
+        # CRITICAL FIX: Don't extract name if message looks like an address
+        msg_lower = message.lower()
+        
+        # List of location indicators
+        location_indicators = [
+            'india', 'nepal', 'pakistan', 'bangladesh', 'dubai',
+            'mumbai', 'delhi', 'pune', 'bangalore', 'kathmandu',
+            'karachi', 'dhaka', 'lahore'
+        ]
+        
+        # If message contains location names, don't treat as name
+        for location in location_indicators:
+            if location in msg_lower:
+                logger.info(f"⏭️ Skipping name extraction (message contains location: {location})")
+                return None
+        
+        # If message has commas (likely address format), don't treat as name
+        if ',' in message:
+            logger.info(f"⏭️ Skipping name extraction (message has commas, likely address)")
+            return None
+        
         # Try all extraction methods
         all_methods = [
             ('explicit', self.name_extractor._extract_explicit_name),
@@ -404,6 +470,10 @@ class FieldExtractors:
                     # Clean and validate
                     cleaned = self.name_extractor._clean_name_candidate(name)
                     if cleaned and self.name_extractor._validate_name_candidate(cleaned):
+                        # Additional check: name shouldn't be a known city
+                        if cleaned.lower() in location_indicators:
+                            continue
+                        
                         return {
                             'value': cleaned,
                             'confidence': 'high' if method_name in ['explicit', 'with_title'] else 'medium',
@@ -437,7 +507,7 @@ class FieldExtractors:
         address_value = address_result.get('address')
         
         # Additional validation
-        if not address_value or len(address_value) < 5:
+        if not address_value or len(address_value) < 2:
             return None
         
         metadata = {

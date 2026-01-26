@@ -1,5 +1,6 @@
 """
 Country Extractor - Robust country detection logic
+FIXED: Added "jhapa" to Nepal cities list
 """
 
 import re
@@ -45,7 +46,8 @@ class CountryExtractor(BaseExtractor):
                 'kathmandu', 'pokhara', 'lalitpur', 'patan', 'bhaktapur',
                 'biratnagar', 'birgunj', 'dharan', 'bharatpur', 'hetauda',
                 'janakpur', 'butwal', 'dhangadhi', 'nepalgunj', 'itahari',
-                'kalaiya', 'bhimdatta', 'gulariya', 'tulsipur', 'rajbiraj'
+                'kalaiya', 'bhimdatta', 'gulariya', 'tulsipur', 'rajbiraj',
+                'jhapa'  # ✅ ADDED JHAPA HERE - CRITICAL FIX
             ],
             'states': [
                 'bagmati', 'gandaki', 'lumbini', 'karnali', 'sudurpashchim',

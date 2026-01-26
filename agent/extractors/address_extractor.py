@@ -1,5 +1,6 @@
 """
 Address Extractor - Robust address extraction logic
+FIXED VERSION: Added "jhapa" to Nepal cities list
 """
 
 import re
@@ -25,7 +26,7 @@ class AddressExtractor(BaseExtractor):
         'vihar', 'puram', 'niwas', 'kunj', 'enclave', 'residency'
     ]
     
-    # Location/city names (comprehensive)
+    # Location/city names (comprehensive) - ✅ ADDED JHAPA
     LOCATION_NAMES = [
         # India - Major cities
         'mumbai', 'delhi', 'bangalore', 'bengaluru', 'hyderabad', 'ahmedabad',
@@ -43,9 +44,10 @@ class AddressExtractor(BaseExtractor):
         'west bengal', 'madhya pradesh', 'mp', 'andhra pradesh', 'ap',
         'telangana', 'odisha', 'jharkhand', 'chhattisgarh',
         
-        # Nepal
+        # Nepal - ✅ JHAPA ADDED HERE
         'kathmandu', 'pokhara', 'lalitpur', 'bhaktapur', 'biratnagar',
-        'birgunj', 'dharan', 'bharatpur', 'hetauda', 'janakpur',
+        'birgunj', 'dharan', 'bharatpur', 'hetauda', 'janakpur', 'jhapa',
+        'butwal', 'dhangadhi', 'nepalgunj', 'itahari',
         
         # Pakistan
         'karachi', 'lahore', 'islamabad', 'rawalpindi', 'faisalabad',
@@ -70,11 +72,21 @@ class AddressExtractor(BaseExtractor):
     ]
     
     def extract(self, message: str, context: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
-        """Extract address from message"""
+        """Extract address from message - FIXED to accept city names"""
         original_message = message
         message = self.clean_message(message)
         
-        # Check if message contains address indicators
+        # FIRST: Check if the entire message is just a city name
+        clean_message = message.strip().lower()
+        if clean_message in [city.lower() for city in self.LOCATION_NAMES]:
+            return {
+                'address': message.strip().title(),
+                'confidence': 'high',
+                'method': 'city_only',
+                'is_city_only': True
+            }
+        
+        # SECOND: Check if message contains address indicators
         if not self._find_address_indicators(message):
             # Try location-based extraction
             location_address = self._extract_location_based(message)
@@ -86,7 +98,7 @@ class AddressExtractor(BaseExtractor):
                 }
             return None
         
-        # Clean the message by removing non-address elements
+        # THIRD: Clean the message by removing non-address elements
         cleaned = self._clean_for_extraction(message)
         
         # Extract location parts
@@ -256,7 +268,7 @@ class AddressExtractor(BaseExtractor):
         return None
     
     def _extract_location_based(self, message: str) -> Optional[str]:
-        """Extract address when location names are present"""
+        """Extract address when location names are present - FIXED"""
         msg_lower = message.lower()
         
         # Check for city names
@@ -268,6 +280,10 @@ class AddressExtractor(BaseExtractor):
         
         if not found_location:
             return None
+        
+        # For single word city names, return immediately
+        if message.strip().lower() == found_location:
+            return found_location.title()
         
         # Extract text around the location
         location_pos = msg_lower.index(found_location)
@@ -296,7 +312,7 @@ class AddressExtractor(BaseExtractor):
             if len(after_words) <= 3 and not re.search(r'\d{5,}|@', after_clean):
                 address_parts.append(after_words[0].title())
         
-        if len(address_parts) >= 2:
+        if len(address_parts) >= 1:
             return ', '.join(address_parts)
         
         return None
@@ -324,11 +340,18 @@ class AddressExtractor(BaseExtractor):
         return ', '.join(formatted_parts)
     
     def _validate_address(self, address: str) -> bool:
-        """Validate if string is likely an address - IMPROVED with strict date checking"""
-        if not address or len(address) < 3:
+        """Validate if string is likely an address - FIXED to accept city names"""
+        if not address or len(address) < 2:
             return False
         
         addr_lower = address.lower()
+        
+        # ========================
+        # ACCEPT CITY NAMES IMMEDIATELY
+        # ========================
+        # Check if it's exactly a known city name
+        if addr_lower in [city.lower() for city in self.LOCATION_NAMES]:
+            return True
         
         # ========================
         # STRICT DATE PATTERN EXCLUSION
@@ -414,32 +437,36 @@ class AddressExtractor(BaseExtractor):
                 return False
         
         # ========================
-        # SPECIAL HANDLING FOR CITY NAMES
+        # SPECIAL HANDLING FOR CITY NAMES AND LOCATIONS
         # ========================
-        # Check if it's a known city
-        is_city = any(location in addr_lower for location in self.LOCATION_NAMES)
+        # Check if it contains a known location
+        contains_location = any(location in addr_lower for location in self.LOCATION_NAMES)
         
-        if is_city:
-            # For city names only, be more lenient
+        if contains_location:
+            # For locations, be more lenient
             words = address.split()
-            if len(words) == 1:
-                # Single word that's a city - accept it
-                return True
-            elif len(words) <= 3:
-                # Short address (like "Delhi", "New Delhi", "South Delhi")
-                # Check if it doesn't contain other invalid patterns
-                invalid_patterns = [
-                    r'\d{10,}',          # Phone number
-                    r'\S+@\S+\.\S+',     # Email
-                    r'price|cost|how much|fee',  # Price keywords
-                ]
-                for pattern in invalid_patterns:
-                    if re.search(pattern, addr_lower):
-                        return False
-                return True
+            if len(words) <= 4:
+                # Check each word
+                valid_words = 0
+                for word in words:
+                    word_lower = word.lower()
+                    # Skip very short words
+                    if len(word) < 2:
+                        continue
+                    # Skip words that are obviously not address parts
+                    if word_lower in ['the', 'and', 'or', 'for', 'with', 'from', 'to']:
+                        continue
+                    # Skip digits-only words
+                    if word.isdigit():
+                        continue
+                    valid_words += 1
+                
+                # Accept if at least half the words are valid
+                if valid_words >= max(1, len(words) // 2):
+                    return True
         
         # ========================
-        # FOR NON-CITY ADDRESSES
+        # FOR NON-LOCATION ADDRESSES
         # ========================
         # Check for address indicators
         has_indicator = False
@@ -468,6 +495,7 @@ class AddressExtractor(BaseExtractor):
             r'\d{10,}',          # Phone numbers
             r'\S+@\S+\.\S+',     # Emails
             r'^\d+$',            # Only numbers
+            r'price|cost|how much|fee',  # Price keywords in non-city context
         ]
         
         for pattern in invalid_patterns:
@@ -475,3 +503,40 @@ class AddressExtractor(BaseExtractor):
                 return False
         
         return True
+    
+    def is_valid_address(self, address: str) -> bool:
+        """Public method to validate address - SIMPLIFIED VERSION"""
+        if not address or len(address.strip()) < 2:
+            return False
+        
+        address_lower = address.lower().strip()
+        
+        # Accept city names immediately
+        if address_lower in [city.lower() for city in self.LOCATION_NAMES]:
+            return True
+        
+        # Accept any string that's at least 2 chars and doesn't contain date patterns
+        # Check for obvious date patterns
+        date_patterns = [
+            r'\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}',
+            r'\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}',
+            r'\d{1,2}\s+\w+\s+\d{4}',
+            r'\w+\s+\d{1,2}\s+\d{4}',
+        ]
+        
+        for pattern in date_patterns:
+            if re.search(pattern, address_lower):
+                return False
+        
+        # Check for month names
+        months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+        for month in months:
+            if month in address_lower:
+                # Check if it's followed by a number (likely a date)
+                if re.search(rf'{month}\s+\d{{1,2}}', address_lower) or \
+                   re.search(rf'\d{{1,2}}\s+{month}', address_lower):
+                    return False
+        
+        # For all other cases, accept addresses with 2+ chars
+        return len(address.strip()) >= 2

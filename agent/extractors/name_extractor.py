@@ -164,22 +164,40 @@ class NameExtractor(BaseExtractor):
         return None
     
     def _extract_cleaned_name(self, message: str) -> Optional[str]:
-        """Extract and clean name from any part of message"""
+        """Extract and clean name from any part of message - ENHANCED VERSION"""
         # Remove common non-name patterns first
         cleaned_msg = self._remove_non_name_patterns(message)
         
         # Look for word sequences that might be names
         words = cleaned_msg.split()
         
-        # Try different combinations
-        for i in range(len(words)):
-            for j in range(i + 1, min(i + 4, len(words) + 1)):
-                candidate = ' '.join(words[i:j])
+        if not words:
+            return None
+        
+        # Try different combinations, starting with LONGEST combinations first
+        # This ensures we get full names like "Rupesh Poudel" before partial matches
+        max_words = min(4, len(words))  # Try up to 4-word names
+        
+        # Start from longest combinations down to shortest
+        for word_count in range(max_words, 0, -1):
+            for i in range(len(words) - word_count + 1):
+                candidate = ' '.join(words[i:i + word_count])
                 
                 # Clean and validate
                 cleaned = self._clean_name_candidate(candidate)
                 if cleaned and self._validate_name_candidate(cleaned):
-                    return cleaned
+                    # Additional check: prefer names with 2+ words over single words
+                    if word_count >= 2 or len(cleaned.split()) >= 2:
+                        return cleaned
+        
+        # If no multi-word names found, try single words as last resort
+        for word in words:
+            if len(word) >= 3:  # Minimum 3 characters for a name
+                cleaned = self._clean_name_candidate(word)
+                if cleaned and self._validate_name_candidate(cleaned):
+                    # Only return single word if it's a known common name
+                    if word.lower() in self.COMMON_FIRST_NAMES:
+                        return cleaned
         
         return None
     
@@ -341,17 +359,42 @@ class NameExtractor(BaseExtractor):
         return any(word in self.COMMON_FIRST_NAMES for word in words)
     
     def _validate_name_candidate(self, name: str) -> bool:
-        """Validate if string is likely a name"""
+        """Validate if string is likely a name - ENHANCED"""
         if not name or len(name) < 2:
             return False
         
         words = name.split()
         
-        # Check word count (1-3 words for names)
-        if len(words) < 1 or len(words) > 3:
+        # Check word count (1-4 words for names)
+        if len(words) < 1 or len(words) > 4:
             return False
         
-        # Check each word
+        # For single words, check if it's a common name
+        if len(words) == 1:
+            word_lower = words[0].lower()
+            
+            # Single letters or very short strings are not names
+            if len(words[0]) < 2:
+                return False
+                
+            # Check if it's in excluded words
+            if word_lower in self.EXCLUDED_WORDS:
+                return False
+                
+            # Check if it's a connector word
+            if word_lower in self.CONNECTOR_WORDS:
+                return False
+                
+            # No digits
+            if any(c.isdigit() for c in words[0]):
+                return False
+                
+            # Must be at least 2 characters and look like a name
+            return len(words[0]) >= 2 and words[0][0].isalpha()
+        
+        # For multi-word names (like "Rupesh Poudel")
+        valid_word_count = 0
+        
         for word in words:
             word_lower = word.lower()
             
@@ -374,19 +417,13 @@ class NameExtractor(BaseExtractor):
             # Not all uppercase (unless it's a title abbreviation)
             if word.isupper() and len(word) > 2:
                 return False
+            
+            # Count valid words
+            if len(word) >= 2 and word[0].isalpha():
+                valid_word_count += 1
         
-        # For single words, must be a common name
-        if len(words) == 1:
-            word_lower = words[0].lower()
-            if word_lower not in self.COMMON_FIRST_NAMES and len(words[0]) < 3:
-                return False
-        
-        # Check if entire phrase is excluded
-        full_phrase = ' '.join([w.lower() for w in words])
-        if full_phrase in self.EXCLUDED_WORDS:
-            return False
-        
-        return True
+        # At least half of the words should be valid
+        return valid_word_count >= max(2, len(words) // 2)
     
     def _format_name(self, name: str) -> str:
         """Format name (capitalize properly)"""
