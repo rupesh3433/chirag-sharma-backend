@@ -706,6 +706,12 @@ class DetailsCollector:
         suggestions: List[str]
     ) -> Tuple[str, BookingIntent, Dict]:
         """Handle when fields are successfully updated."""
+        
+        # CRITICAL FIX: Check for missing email specifically
+        email_check = self._check_and_handle_email_missing(intent, collected, missing, language)
+        if email_check:
+            return email_check
+        
         # Check completion
         if intent.is_complete():
             logger.info(f"✅ [UPDATE] All details collected")
@@ -812,3 +818,35 @@ class DetailsCollector:
             "mode": "booking",
             "understood": True
         })
+
+    def _check_and_handle_email_missing(
+        self,
+        intent: BookingIntent,
+        collected: Dict,
+        missing: List[str],
+        language: str
+    ) -> Optional[Tuple[str, BookingIntent, Dict]]:
+        """
+        Special handler for when email is missing after extraction.
+        This ensures we specifically ask for email if it wasn't captured.
+        """
+        if 'email' in missing and 'email' not in collected:
+            logger.info(f"📧 [EMAIL CHECK] Email is missing, prompting specifically")
+            
+            # Create a specific email prompt
+            email_prompt = self.prompts.get_specific_field_prompt('email', language)
+            
+            # If in sequential mode, set last asked field
+            if self.sequential_processor.is_in_sequential_mode(intent):
+                intent.metadata['_last_asked_field'] = 'email'
+            
+            return (BookingState.COLLECTING_DETAILS.value, intent, {
+                "action": "ask_email",
+                "message": email_prompt,
+                "missing": missing,
+                "mode": "booking",
+                "understood": True,
+                "asking_specific_field": "email"
+            })
+        
+        return None

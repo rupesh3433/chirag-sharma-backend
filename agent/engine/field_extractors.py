@@ -58,7 +58,7 @@ class FieldExtractors:
                 context: Dict = None) -> Dict[str, Any]:
         """
         ULTIMATE extraction method for multi-field scenarios
-        Handles: "My name is X, phone is Y, email Z, booking on DATE, address ABC"
+        FIXED: Don't reuse extracted text for other fields
         """
         logger.info(f"🎯 ULTRA EXTRACTION v3.0: '{message[:100]}...'")
         logger.info(f"🔍 [EXTRACT DEBUG] Context keys: {list(context.keys()) if context else []}")
@@ -98,7 +98,19 @@ class FieldExtractors:
         working_message = message
         extraction_map = {}  # Track what was extracted from where
         
-        for field_name in self.EXTRACTION_ORDER:
+        # FIXED ORDER: Name FIRST, then clean it from message
+        fixed_extraction_order = [
+             'email',      # Then email
+
+            'name',       # Extract name 
+            'phone',      # Then phone  
+            'pincode',    # Then pincode
+            'date',       # Then date
+            'country',    # Then country
+            'address',    # Address LAST (from remaining text)
+        ]
+        
+        for field_name in fixed_extraction_order:
             # Check if field is in identified positions
             if field_name in field_positions:
                 # Extract from specific position
@@ -128,16 +140,14 @@ class FieldExtractors:
                 # Update context
                 enhanced_context[field_name] = field_result['value']
                 
-                # CRITICAL: Clean extracted value from working message
-                # PRODUCTION NOTE: Names are extracted early now, and we clean them
-                # to avoid interference with other fields
-                if field_name not in ['name', 'address']:
-                    working_message = self._remove_extracted_value(
-                        working_message, field_result
-                    )
-                    logger.info(f"✅ Extracted {field_name}, cleaned message: '{working_message[:80]}...'")
-                else:
-                    logger.info(f"✅ Extracted {field_name}: {field_result['value']} (no cleaning needed)")
+                # CRITICAL FIX: Clean ALL extracted text from working message
+                # This prevents reusing the same text for other fields
+                if field_result.get('original_text'):
+                    original_text = field_result['original_text']
+                    working_message = self._remove_text_from_message(working_message, original_text)
+                    logger.info(f"🧹 Cleaned '{field_name}' text: '{original_text}' → Working message: '{working_message[:80]}...'")
+                
+                logger.info(f"✅ Extracted {field_name}: {field_result['value']}")
         
         # PHASE 3: Inference
         inferred_fields = self._infer_missing_fields(result['extracted'], enhanced_context)
@@ -265,6 +275,85 @@ class FieldExtractors:
             positions['pincode'] = match.group(1)
         
         return positions
+
+
+    def _remove_text_from_message(self, message: str, text_to_remove: str) -> str:
+        """
+        Remove extracted text from message to prevent re-extraction
+        COMPLETELY FIXED VERSION - Ensures name parts are completely removed
+        
+        CRITICAL FIX: Properly remove ALL parts of the name to prevent them
+        from being passed to other field extractors
+        """
+        if not text_to_remove or len(text_to_remove.strip()) < 2:
+            return message
+        
+        original_message = message
+        text_to_remove_lower = text_to_remove.lower().strip()
+        message_lower = message.lower()
+        
+        logger.info(f"🧹 [CLEANING DEBUG] Removing: '{text_to_remove}' from message: '{message}'")
+        
+        # SPECIAL CASE: If text_to_remove is the entire message, return empty
+        if message_lower == text_to_remove_lower:
+            logger.info(f"🧹 [CLEANING] Complete match - returning empty string")
+            return ""
+        
+        # Split both into words for more precise removal
+        remove_words = text_to_remove_lower.split()
+        message_words = message_lower.split()
+        
+        # Track which message words to keep (not part of text_to_remove)
+        words_to_keep = []
+        original_message_words = message.split()
+        
+        # Use a sliding window approach to find and remove multi-word matches
+        i = 0
+        while i < len(message_words):
+            matched = False
+            
+            # Check if this starts a sequence that matches text_to_remove
+            for j in range(1, len(remove_words) + 1):
+                if i + j <= len(message_words):
+                    subsequence = ' '.join(message_words[i:i+j])
+                    if subsequence == text_to_remove_lower:
+                        # Found exact match - skip these words
+                        i += j
+                        matched = True
+                        logger.info(f"🧹 [CLEANING] Found exact multi-word match, skipping {j} words")
+                        break
+            
+            # If not matched as a sequence, check individual word
+            if not matched:
+                current_word_lower = message_words[i]
+                current_word_original = original_message_words[i] if i < len(original_message_words) else ""
+                
+                # Check if current word is in text_to_remove (and not just a common article/preposition)
+                if current_word_lower in remove_words and len(current_word_lower) > 2:
+                    # It's part of text_to_remove - skip it
+                    logger.info(f"🧹 [CLEANING] Removing word: '{current_word_original}'")
+                    i += 1
+                else:
+                    # Keep this word
+                    words_to_keep.append(current_word_original)
+                    i += 1
+        
+        # Reconstruct the message
+        cleaned_message = ' '.join(words_to_keep)
+        
+        # If we removed everything, return empty
+        if not cleaned_message.strip():
+            return ""
+        
+        # Additional cleanup: remove any lingering punctuation issues
+        cleaned_message = re.sub(r'^\s*,\s*', '', cleaned_message)
+        cleaned_message = re.sub(r'\s*,\s*$', '', cleaned_message)
+        cleaned_message = re.sub(r'\s*,\s*,', ',', cleaned_message)
+        cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
+        
+        logger.info(f"🧹 [CLEANING RESULT] Original: '{original_message}' → Cleaned: '{cleaned_message}'")
+        
+        return cleaned_message
     
     def _extract_from_text(self, field_name: str, text: str, 
                           context: Dict, already_extracted: Dict) -> Optional[Dict]:
@@ -294,27 +383,395 @@ class FieldExtractors:
             return self._extract_pincode_ultimate(text, context, already_extracted)
         
         return None
+
+
+    def _looks_like_name(self, text: str) -> bool:
+        """Check if text looks like a person name rather than a location"""
+        
+        text = text.strip()
+        if len(text) < 2:
+            return False
+        
+        words = text.split()
+        
+        # Names typically have 1-4 words
+        if len(words) > 4:
+            return False
+        
+        # Check if all words start with capital letters (common for names)
+        all_capitalized = all(word and word[0].isupper() for word in words)
+        
+        # Check for common name patterns
+        if all_capitalized:
+            # Check for common name titles
+            common_titles = ['Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sir', 'Miss', 'Master']
+            if words[0] in common_titles:
+                return True
+            
+            # Check for common name suffixes
+            common_suffixes = ['Jr', 'Sr', 'II', 'III', 'IV', 'PhD', 'MD']
+            if words[-1] in common_suffixes:
+                return True
+            
+            # If 2-3 words all capitalized, likely a name
+            if 2 <= len(words) <= 3:
+                # Check if contains location words
+                location_words = ['road', 'street', 'lane', 'avenue', 'city', 'town', 
+                                'village', 'district', 'state', 'country', 'nagar', 'colony']
+                
+                text_lower = text.lower()
+                has_location_word = any(word in text_lower for word in location_words)
+                
+                # If no location words, likely a name
+                if not has_location_word:
+                    return True
+        
+        # Check if it's a single capitalized word (could be name or location)
+        if len(words) == 1 and text[0].isupper():
+            # Common single names
+            common_single_names = ['John', 'Mary', 'David', 'Sarah', 'Michael', 'Lisa', 
+                                'James', 'Emma', 'Robert', 'Olivia', 'William', 'Sophia']
+            if text in common_single_names:
+                return True
+        
+        return False
     
     def _extract_field_enhanced(self, field_name: str, message: str, 
                                 context: Dict, already_extracted: Dict) -> Optional[Dict]:
-        """Extract single field using ALL available methods"""
+        """Extract single field using ALL available methods - FIXED FOR BULK INPUT"""
         
-        if field_name == 'phone':
-            return self._extract_phone_ultimate(message, context, already_extracted)
-        elif field_name == 'email':
+        # CRITICAL FIX: For bulk comma-separated input, extract each field properly
+        if ',' in message and message.strip():
+            # Handle bulk comma-separated input
+            return self._extract_from_bulk_input(field_name, message, context, already_extracted)
+        
+        # Normal extraction for non-bulk input
+        if field_name == 'email':
             return self._extract_email_ultimate(message, context)
+        elif field_name == 'phone':
+            return self._extract_phone_ultimate(message, context, already_extracted)
+        elif field_name == 'name':
+            return self._extract_name_ultimate(message, context, already_extracted)
         elif field_name == 'date':
             return self._extract_date_ultimate(message, context)
         elif field_name == 'country':
             return self._extract_country_ultimate(message, context, already_extracted)
         elif field_name == 'pincode':
             return self._extract_pincode_ultimate(message, context, already_extracted)
-        elif field_name == 'name':
-            return self._extract_name_ultimate(message, context, already_extracted)
         elif field_name == 'address':
             return self._extract_address_ultimate(message, context, already_extracted)
         
         return None
+
+
+    def _extract_from_bulk_input(self, field_name: str, message: str, 
+                                context: Dict, already_extracted: Dict) -> Optional[Dict]:
+        """
+        Extract field from bulk comma-separated input like 'Ramesh Kumar, +919876543210, ramesh@email.com, April 15, 2025, ...'
+        
+        CRITICAL FIX: Extract year from FULL MESSAGE first, then use it for date extraction
+        """
+        
+        logger.info(f"🔍 [BULK EXTRACT] Extracting '{field_name}' from bulk input: '{message}'")
+        
+        # Split by comma and clean parts
+        parts = [part.strip() for part in message.split(',')]
+        logger.info(f"🔍 [BULK EXTRACT] Parts: {parts}")
+        
+        # Remove empty parts
+        parts = [p for p in parts if p]
+        
+        # CRITICAL FIX: For NAME extraction
+        if field_name == 'name':
+            # Name is usually first in bulk input
+            for i, part in enumerate(parts):
+                if i == 0:  # First part is likely name
+                    # Validate it looks like a name
+                    if self._looks_like_name(part):
+                        return {
+                            'value': part,
+                            'confidence': 'high',
+                            'method': 'bulk_first_position',
+                            'original_text': part,
+                            'metadata': {'position': 'first', 'from_bulk': True}
+                        }
+        
+        # CRITICAL FIX: For EMAIL extraction
+        elif field_name == 'email':
+            # Email has clear pattern @domain
+            for i, part in enumerate(parts):
+                email_result = self.email_extractor._extract_standard_email(part)
+                if email_result:
+                    email_value = email_result.get('email', '')
+                    logger.info(f"✅ [BULK EXTRACT] Found email at position {i}: '{email_value}'")
+                    return {
+                        'value': email_value,
+                        'confidence': 'very_high',
+                        'method': 'bulk_pattern_match',
+                        'original_text': part,
+                        'metadata': {'position': i, 'from_bulk': True}
+                    }
+        
+        # CRITICAL FIX: For PHONE extraction
+        elif field_name == 'phone':
+            # Phone has clear pattern +91xxxxxxxxxx
+            for i, part in enumerate(parts):
+                phone_result = self.phone_extractor.extract_comprehensive(part, context)
+                if phone_result:
+                    logger.info(f"✅ [BULK EXTRACT] Found phone at position {i}: '{phone_result.get('full_phone')}'")
+                    return {
+                        'value': phone_result,
+                        'confidence': 'very_high',
+                        'method': 'bulk_pattern_match',
+                        'original_text': part,
+                        'metadata': {'position': i, 'from_bulk': True}
+                    }
+        
+        # CRITICAL FIX: For DATE extraction - THE MAIN FIX
+        elif field_name == 'date':
+            # Date might span multiple parts: "April 15, 2025"
+            
+            # STEP 1: Extract year from FULL MESSAGE FIRST (before splitting)
+            year_in_full_message = re.search(r'\b(20\d{2})\b', message)
+            
+            logger.info(f"🔍 [BULK DATE] Searching for year in FULL message: '{message}'")
+            if year_in_full_message:
+                logger.info(f"✅ [BULK DATE] Found year in FULL message: {year_in_full_message.group(1)}")
+            else:
+                logger.info(f"⚠️ [BULK DATE] No year found in FULL message")
+            
+            # STEP 2: Try to combine consecutive parts
+            for i in range(len(parts) - 1):
+                combined_with_comma = f"{parts[i]}, {parts[i+1]}"
+                combined_without_comma = f"{parts[i]} {parts[i+1]}"
+                
+                # Create context with year from FULL message
+                date_context = {**(context or {})}
+                if year_in_full_message:
+                    provided_year = int(year_in_full_message.group(1))
+                    date_context['preferred_year'] = provided_year
+                    logger.info(f"🔍 [BULK DATE] Setting preferred_year={provided_year} in context")
+                
+                # Try with comma
+                logger.info(f"🔍 [BULK DATE] Trying combined: '{combined_with_comma}'")
+                date_result = self.date_extractor.extract(combined_with_comma, date_context)
+                
+                # Try without comma
+                if not date_result:
+                    logger.info(f"🔍 [BULK DATE] Trying combined (no comma): '{combined_without_comma}'")
+                    date_result = self.date_extractor.extract(combined_without_comma, date_context)
+                    if date_result:
+                        combined_with_comma = combined_without_comma
+                
+                if date_result:
+                    extracted_date = date_result.get('date')
+                    logger.info(f"✅ [BULK DATE] DateExtractor returned: {extracted_date}")
+                    
+                    # CRITICAL: Verify extracted year matches user's year
+                    if year_in_full_message:
+                        provided_year_str = year_in_full_message.group(1)
+                        extracted_year_str = extracted_date.split('-')[0]
+                        
+                        if extracted_year_str != provided_year_str:
+                            logger.warning(f"⚠️ [BULK DATE] YEAR MISMATCH! Extracted {extracted_year_str} but user said {provided_year_str}")
+                            # FORCE correct year
+                            month_day = '-'.join(extracted_date.split('-')[1:])
+                            corrected_date = f"{provided_year_str}-{month_day}"
+                            date_result['date'] = corrected_date
+                            logger.info(f"✅ [BULK DATE] CORRECTED to user's year: {corrected_date}")
+                            extracted_date = corrected_date
+                    
+                    logger.info(f"✅ [BULK EXTRACT] Found date spanning parts {i} and {i+1}: '{extracted_date}'")
+                    return {
+                        'value': extracted_date,
+                        'confidence': 'high',
+                        'method': 'bulk_combined_parts',
+                        'original_text': combined_with_comma,
+                        'metadata': {
+                            'position': f'{i}-{i+1}',
+                            'from_bulk': True,
+                            'year_explicitly_provided': bool(year_in_full_message)
+                        }
+                    }
+            
+            # STEP 3: Try individual parts (with year from full message)
+            for i, part in enumerate(parts):
+                date_context = {**(context or {})}
+                if year_in_full_message:
+                    provided_year = int(year_in_full_message.group(1))
+                    date_context['preferred_year'] = provided_year
+                    logger.info(f"🔍 [BULK DATE] Trying part {i}: '{part}' with preferred_year={provided_year}")
+                
+                date_result = self.date_extractor.extract(part, date_context)
+                
+                if date_result:
+                    extracted_date = date_result.get('date')
+                    
+                    # Verify year
+                    if year_in_full_message:
+                        provided_year_str = year_in_full_message.group(1)
+                        extracted_year_str = extracted_date.split('-')[0]
+                        
+                        if extracted_year_str != provided_year_str:
+                            month_day = '-'.join(extracted_date.split('-')[1:])
+                            corrected_date = f"{provided_year_str}-{month_day}"
+                            date_result['date'] = corrected_date
+                            logger.info(f"✅ [BULK DATE] Corrected to user's year: {corrected_date}")
+                            extracted_date = corrected_date
+                    
+                    logger.info(f"✅ [BULK EXTRACT] Found date at position {i}: '{extracted_date}'")
+                    return {
+                        'value': extracted_date,
+                        'confidence': 'high',
+                        'method': 'bulk_pattern_match',
+                        'original_text': part,
+                        'metadata': {
+                            'position': i,
+                            'from_bulk': True,
+                            'year_explicitly_provided': bool(year_in_full_message)
+                        }
+                    }
+        
+        # PINCODE extraction
+        elif field_name == 'pincode':
+            for i, part in enumerate(parts):
+                pincode_match = re.search(r'\b(\d{5,6})\b', part)
+                if pincode_match:
+                    pincode_value = pincode_match.group(1)
+                    logger.info(f"✅ [BULK EXTRACT] Found pincode at position {i}: '{pincode_value}'")
+                    return {
+                        'value': pincode_value,
+                        'confidence': 'very_high',
+                        'method': 'bulk_pattern_match',
+                        'original_text': part,
+                        'metadata': {'position': i, 'from_bulk': True}
+                    }
+        
+        # ADDRESS extraction
+        elif field_name == 'address':
+            for i, part in enumerate(parts):
+                if len(part) > 3 and i >= 3:  # Address often comes after name, phone, email
+                    if self._looks_like_location(part):
+                        logger.info(f"✅ [BULK EXTRACT] Found address at position {i}: '{part}'")
+                        return {
+                            'value': part,
+                            'confidence': 'medium',
+                            'method': 'bulk_position',
+                            'original_text': part,
+                            'metadata': {'position': i, 'from_bulk': True}
+                        }
+        
+        # COUNTRY extraction
+        elif field_name == 'country':
+            for i, part in enumerate(parts):
+                country_result = self.country_extractor.extract(part, context)
+                if country_result:
+                    logger.info(f"✅ [BULK EXTRACT] Found country at position {i}: '{country_result.get('country')}'")
+                    return {
+                        'value': country_result.get('country'),
+                        'confidence': 'high',
+                        'method': 'bulk_pattern_match',
+                        'original_text': part,
+                        'metadata': {'position': i, 'from_bulk': True}
+                    }
+        
+        # If not found in bulk, try normal extraction
+        logger.info(f"⚠️ [BULK EXTRACT] Field '{field_name}' not found in bulk parts")
+        return None
+
+
+
+    def _looks_like_location(self, text: str) -> bool:
+        """Check if text looks like a location/address rather than other field types"""
+        
+        text = text.strip()
+        if len(text) < 2:
+            return False
+        
+        # Check for common non-location patterns FIRST
+        # Email pattern
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if re.match(email_pattern, text, re.IGNORECASE):
+            return False
+        
+        # Phone pattern
+        phone_pattern = r'^\+?\d[\d\s\-\(\)]{8,}$'
+        if re.match(phone_pattern, text):
+            return False
+        
+        # Date patterns
+        date_patterns = [
+            r'^\d{1,2}[-/]\d{1,2}[-/]\d{4}$',
+            r'^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2},? \d{4}$',
+            r'^\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{4}$'
+        ]
+        for pattern in date_patterns:
+            if re.match(pattern, text, re.IGNORECASE):
+                return False
+        
+        # Pincode only (exactly 5-6 digits)
+        pincode_pattern = r'^\d{5,6}$'
+        if re.match(pincode_pattern, text):
+            return False
+        
+        # Now check for location indicators
+        text_lower = text.lower()
+        
+        # Location keywords
+        location_keywords = [
+            # Street types
+            'road', 'street', 'lane', 'avenue', 'boulevard', 'drive', 'circle',
+            'way', 'court', 'place', 'plaza', 'square',
+            # Indian address terms
+            'nagar', 'colony', 'society', 'complex', 'building', 'flat', 'apartment',
+            'house', 'villa', 'residency', 'heights', 'estate',
+            # Area types
+            'city', 'town', 'village', 'district', 'state', 'country', 'province',
+            'region', 'area', 'locality', 'ward', 'zone',
+            # Directional
+            'north', 'south', 'east', 'west', 'central'
+        ]
+        
+        # Check for location keywords
+        if any(keyword in text_lower for keyword in location_keywords):
+            return True
+        
+        # Check for comma-separated location format (City, State)
+        if ',' in text:
+            parts = [p.strip() for p in text.split(',')]
+            if 2 <= len(parts) <= 3:
+                return True
+        
+        # Check if it's a known city/country
+        known_locations = [
+            # Indian cities
+            'delhi', 'mumbai', 'pune', 'bangalore', 'kolkata', 'chennai',
+            'hyderabad', 'ahmedabad', 'surat', 'jaipur', 'lucknow', 'kanpur',
+            'nagpur', 'indore', 'bhopal', 'visakhapatnam', 'patna', 'vadodara',
+            # Nepal cities
+            'kathmandu', 'pokhara', 'lalitpur', 'bharatpur', 'biratnagar',
+            # Pakistan cities
+            'karachi', 'lahore', 'islamabad', 'rawalpindi', 'faisalabad',
+            # Bangladesh cities
+            'dhaka', 'chittagong', 'sylhet', 'rajshahi', 'khulna',
+            # UAE cities
+            'dubai', 'abu dhabi', 'sharjah', 'ajman',
+            # Countries
+            'india', 'nepal', 'pakistan', 'bangladesh', 'dubai', 'uae'
+        ]
+        
+        if text_lower in known_locations:
+            return True
+        
+        # Check for multi-word capitalized phrases (likely location names)
+        words = text.split()
+        if len(words) >= 2:
+            # Check if most words start with capital letters
+            capitalized_count = sum(1 for w in words if w and w[0].isupper())
+            if capitalized_count >= len(words) * 0.7:  # 70% capitalized
+                return True
+        
+        return False
     
     def _extract_phone_ultimate(self, message: str, context: Dict, 
                                 extracted: Dict) -> Optional[Dict]:
@@ -340,18 +797,78 @@ class FieldExtractors:
         }
     
     def _extract_email_ultimate(self, message: str, context: Dict) -> Optional[Dict]:
-        """Ultimate email extraction with validation"""
+        """Ultimate email extraction with validation - FIXED VERSION"""
+        
+        logger.info(f"📧 [EMAIL EXTRACT ULTIMATE] Starting extraction from: '{message[:100]}...'")
+        
+        # Try all extraction methods
+        email_result = None
+        
+        # Method 1: Explicit email extraction
         email_result = self.email_extractor._extract_explicit_email(message)
         
+        # Method 2: Standard email extraction
         if not email_result:
             email_result = self.email_extractor._extract_standard_email(message)
         
+        # Method 3: Simple pattern match (fallback)
         if not email_result:
+            # Direct regex pattern for emails
+            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+            matches = re.findall(email_pattern, message, re.IGNORECASE)
+            
+            if matches:
+                logger.info(f"📧 [EMAIL EXTRACT] Found via regex pattern: {matches}")
+                # Use the first match
+                email_value = matches[0]
+                
+                # Get provider info
+                provider_info = self.email_extractor.get_provider_info(email_value)
+                
+                # Create result structure
+                email_result = {
+                    'email': email_value,
+                    'confidence': 'medium',
+                    'method': 'regex_fallback',
+                    'local_part': email_value.split('@')[0] if '@' in email_value else '',
+                    'domain': email_value.split('@')[1] if '@' in email_value else '',
+                    'provider': provider_info.get('provider', 'unknown'),
+                    'provider_info': provider_info,
+                    'masked': False
+                }
+        
+        if not email_result:
+            logger.info(f"❌ [EMAIL EXTRACT] No email found in: '{message[:100]}...'")
             return None
         
         email_value = email_result.get('email', '')
         provider_info = self.email_extractor.get_provider_info(email_value)
-        validation = self.email_extractor.validate_email(email_value)
+        
+        # Enhanced validation
+        validation = {
+            'valid': True,
+            'error': None,
+            'checks': []
+        }
+        
+        # Basic validation checks
+        if not email_value:
+            validation['valid'] = False
+            validation['error'] = 'Empty email'
+        elif '@' not in email_value:
+            validation['valid'] = False
+            validation['error'] = 'Missing @ symbol'
+        elif '.' not in email_value.split('@')[1]:
+            validation['valid'] = False
+            validation['error'] = 'Invalid domain format'
+        elif len(email_value) < 5:
+            validation['valid'] = False
+            validation['error'] = 'Email too short'
+        elif len(email_value) > 100:
+            validation['valid'] = False
+            validation['error'] = 'Email too long'
+        
+        logger.info(f"✅ [EMAIL EXTRACT] Found email: '{email_value}' - Valid: {validation.get('valid')}")
         
         metadata = {
             'local_part': email_result.get('local_part'),
@@ -359,7 +876,8 @@ class FieldExtractors:
             'provider': email_result.get('provider'),
             'provider_info': provider_info,
             'masked': email_result.get('masked'),
-            'valid': validation.get('valid', False)
+            'valid': validation.get('valid', False),
+            'validation_details': validation
         }
         
         return {
@@ -487,6 +1005,8 @@ class FieldExtractors:
         3. Better validation for name context
         """
         msg_lower = message.lower().strip()
+        msg_words = msg_lower.split()  # ← ADD THIS LINE
+
         
         # CRITICAL FIX: Skip if message is a field name or location
         non_name_words = [
@@ -644,9 +1164,68 @@ class FieldExtractors:
         logger.info(f"🔍 [ADDRESS EXTRACTOR] Context has keys: {list(context.keys())}")
         logger.info(f"🔍 [ADDRESS EXTRACTOR] Already extracted: {list(extracted.keys())}")
         
+        # CRITICAL FIX: Skip if message is empty (already extracted everything)
+        if not message or len(message.strip()) < 2:
+            logger.info(f"⏭️ [ADDRESS EXTRACTOR] Skipping - message is empty")
+            return None
+        
+        # CRITICAL FIX: Skip common single words that are likely surnames
+        single_words_to_reject = [
+            'bhandari', 'sharma', 'verma', 'singh', 'kumar', 'patel', 
+            'reddy', 'mehta', 'gupta', 'malik', 'jain', 'shah', 'tiwari',
+            'pandey', 'mishra', 'choudhary', 'yadav', 'thakur', 'naik'
+        ]
+        
+        msg_lower = message.lower().strip()
+        msg_words = msg_lower.split()  # ← ADD THIS LINE
+
+        
+        # Skip if it's a single word that's a common surname
+        if len(msg_lower.split()) == 1 and msg_lower in single_words_to_reject:
+            logger.info(f"⏭️ [ADDRESS EXTRACTOR] Skipping - likely surname: '{message}'")
+            return None
+        
         # Check if this looks like a direct address response
         is_likely_address = self._is_likely_address_response(message, context)
         logger.info(f"🔍 [ADDRESS EXTRACTOR] Likely address response: {is_likely_address}")
+        
+        # CRITICAL FIX: Enhanced check for name parts
+        if 'name' in extracted:
+            name_value = extracted['name']
+            if isinstance(name_value, str):
+                name_lower = name_value.lower()
+                msg_lower = message.lower()
+                
+                # Split both into words
+                name_words = name_lower.split()
+                msg_words = msg_lower.split()
+                
+                # CRITICAL FIX: Check if any word in the message is part of the name
+                # This catches cases like "bhandari" from "Rajat Bhandari"
+                for msg_word in msg_words:
+                    if len(msg_word) > 2 and msg_word in name_words:
+                        logger.info(f"⏭️ [ADDRESS EXTRACTOR] Skipping - '{msg_word}' is part of name: '{name_value}'")
+                        return None
+                
+                # Also check if message is substring of name or vice versa
+                if msg_lower in name_lower or name_lower in msg_lower:
+                    logger.info(f"⏭️ [ADDRESS EXTRACTOR] Skipping - message '{message}' is substring of name '{name_value}'")
+                    return None
+        
+        # CRITICAL FIX: Skip if message looks like just a single name word (not a location)
+        # Location words typically have multiple parts or special indicators
+        if len(msg_words) == 1:
+            # Check if it's a single capitalized word that could be a name/location
+            # But reject if it doesn't have location indicators
+            if not self._has_location_indicators(msg_lower):
+                # Check if it's a common Indian surname (additional safety check)
+                common_surnames = ['sharma', 'verma', 'singh', 'kumar', 'patel', 'reddy', 
+                                'mehta', 'gupta', 'malik', 'jain', 'shah', 'tiwari',
+                                'pandey', 'mishra', 'choudhary', 'yadav', 'thakur']
+                
+                if any(surname in msg_lower for surname in common_surnames):
+                    logger.info(f"⏭️ [ADDRESS EXTRACTOR] Skipping - likely surname without location indicators: '{message}'")
+                    return None
         
         try:
             # Try importing LLM extractor
@@ -750,8 +1329,20 @@ class FieldExtractors:
         if regex_address:
             logger.info(f"✅ [ADDRESS EXTRACTOR] REGEX FOUND: '{regex_address}'")
             
-            # Basic validation
+            # Additional validation: reject if it's just a surname
             if len(regex_address.strip()) >= 2:
+                # Check if it's a single word that's likely a surname
+                regex_lower = regex_address.lower().strip()
+                if len(regex_lower.split()) == 1:
+                    if regex_lower in single_words_to_reject:
+                        logger.info(f"⏭️ [ADDRESS EXTRACTOR] Rejecting regex result - likely surname: '{regex_address}'")
+                        return None
+                    
+                    # Check if it looks like a location (not just a name)
+                    if not self._has_location_indicators(regex_lower):
+                        logger.info(f"⏭️ [ADDRESS EXTRACTOR] Rejecting regex result - no location indicators: '{regex_address}'")
+                        return None
+                
                 return {
                     'value': regex_address,
                     'confidence': 'low',
@@ -765,6 +1356,55 @@ class FieldExtractors:
         
         logger.warning(f"⚠️ [ADDRESS EXTRACTOR] ALL EXTRACTION METHODS FAILED for: '{message[:100]}...'")
         return None
+
+    def _has_location_indicators(self, text: str) -> bool:
+        """
+        Check if text has any indicators of being a location (not just a name).
+        """
+        text_lower = text.lower()
+        
+        # Location keywords
+        location_keywords = [
+            'road', 'street', 'lane', 'avenue', 'boulevard', 'drive', 'circle',
+            'way', 'court', 'place', 'plaza', 'square', 'nagar', 'colony',
+            'society', 'complex', 'building', 'flat', 'apartment', 'house',
+            'villa', 'residency', 'heights', 'estate', 'city', 'town',
+            'village', 'district', 'state', 'country', 'province', 'region',
+            'area', 'locality', 'ward', 'zone', 'north', 'south', 'east',
+            'west', 'central', 'pin', 'pincode', 'postal'
+        ]
+        
+        # Check for location keywords
+        if any(keyword in text_lower for keyword in location_keywords):
+            return True
+        
+        # Check for comma-separated format (common in addresses)
+        if ',' in text_lower and len(text_lower.split(',')) <= 3:
+            return True
+        
+        # Known cities/countries
+        known_locations = [
+            'delhi', 'mumbai', 'pune', 'bangalore', 'kolkata', 'chennai',
+            'hyderabad', 'ahmedabad', 'surat', 'jaipur', 'lucknow', 'kanpur',
+            'nagpur', 'indore', 'bhopal', 'visakhapatnam', 'patna', 'vadodara',
+            'kathmandu', 'pokhara', 'lalitpur', 'bharatpur', 'biratnagar',
+            'karachi', 'lahore', 'islamabad', 'rawalpindi', 'faisalabad',
+            'dhaka', 'chittagong', 'sylhet', 'rajshahi', 'khulna',
+            'dubai', 'abu dhabi', 'sharjah', 'ajman',
+            'india', 'nepal', 'pakistan', 'bangladesh', 'uae'
+        ]
+        
+        if text_lower in known_locations:
+            return True
+        
+        # Check if it's a multi-word phrase with capitalized words (likely location)
+        words = text.split()
+        if len(words) >= 2:
+            capitalized_count = sum(1 for w in words if w and w[0].isupper())
+            if capitalized_count >= len(words) * 0.5:  # 50% capitalized
+                return True
+        
+        return False
     
     def _is_likely_address_response(self, message: str, context: Dict) -> bool:
         """

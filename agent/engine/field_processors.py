@@ -210,35 +210,89 @@ class FieldProcessors:
         metadata: Dict
     ) -> Dict:
         """
-        Complete email processing with validation.
+        Complete email processing with validation - FIXED VERSION
         
-        Validates email format and normalizes to lowercase.
+        CRITICAL FIX: Accept ALL valid emails including .email domain
         """
         try:
-            # Validate email format
-            validation = self.email_validator.validate(email)
+            logger.info(f"📧 [EMAIL PROCESSING] Starting email processing: '{email}'")
             
-            if validation['valid']:
-                # Normalize to lowercase
-                email_normalized = email.lower()
+            # Check if email is actually a string
+            if not isinstance(email, str):
+                email = str(email)
+            
+            # Clean and normalize email
+            email_clean = email.strip()
+            
+            # Check if email contains multiple options (comma-separated)
+            if ',' in email_clean:
+                parts = [part.strip() for part in email_clean.split(',')]
+                valid_emails = []
                 
-                # Check if email actually changed
-                old_email = intent.email
-                if old_email and old_email == email_normalized:
-                    logger.info(f"ℹ️ Email unchanged: {email_normalized}")
-                    return {'updated': False, 'error': None}
+                for part in parts:
+                    if '@' in part and '.' in part:
+                        # Simple validation for comma-separated emails
+                        if 3 < len(part) < 100:
+                            valid_emails.append(part)
                 
-                # Store normalized email
-                intent.email = email_normalized
-                collected["email"] = email_normalized
-                logger.info(f"✅ Email collected: {email_normalized}")
-                return {'updated': True, 'error': None}
-            else:
-                error_msg = validation.get('error', 'Invalid email')
-                return {'updated': False, 'error': f"Email: {error_msg}"}
+                if len(valid_emails) == 1:
+                    # Single valid email found
+                    email_clean = valid_emails[0]
+                    logger.info(f"📧 [EMAIL PROCESSING] Found single email in comma-separated list: {email_clean}")
+                elif len(valid_emails) > 1:
+                    # Multiple emails found - store as options
+                    logger.info(f"📧 [EMAIL PROCESSING] Found {len(valid_emails)} email options")
+                    collected["email_options"] = valid_emails
+                    return {'updated': False, 'error': None, 'multiple_options': True}
+            
+            # Normalize to lowercase
+            email_normalized = email_clean.lower()
+            
+            # CRITICAL FIX: Enhanced email validation that accepts .email domains
+            # Check basic email format first
+            if '@' not in email_normalized or '.' not in email_normalized:
+                logger.warning(f"⚠️ [EMAIL PROCESSING] Invalid format (no @ or .): '{email_normalized}'")
+                return {'updated': False, 'error': 'Invalid email format'}
+            
+            # Check length
+            if len(email_normalized) < 5 or len(email_normalized) > 100:
+                logger.warning(f"⚠️ [EMAIL PROCESSING] Invalid length: '{email_normalized}'")
+                return {'updated': False, 'error': 'Email too short or too long'}
+            
+            # Accept common TLDs including .email
+            valid_tlds = ['.com', '.net', '.org', '.edu', '.gov', '.in', '.co', '.io', 
+                        '.email', '.info', '.biz', '.me', '.us', '.uk', '.ca', '.au',
+                        '.xyz', '.online', '.site', '.website', '.tech', '.store']
+            
+            has_valid_tld = any(email_normalized.endswith(tld) for tld in valid_tlds)
+            
+            if not has_valid_tld:
+                # Also accept emails with country TLDs (like .co.uk, .co.in)
+                if '.' in email_normalized.split('@')[1]:
+                    domain_parts = email_normalized.split('@')[1].split('.')
+                    if len(domain_parts) >= 2:
+                        # Accept if last part is at least 2 chars (like .in, .uk)
+                        if len(domain_parts[-1]) >= 2:
+                            has_valid_tld = True
+            
+            if not has_valid_tld:
+                logger.warning(f"⚠️ [EMAIL PROCESSING] Unrecognized TLD: '{email_normalized}'")
+                # Still continue - might be a new TLD we don't know about
+            
+            # Check if email actually changed
+            old_email = intent.email
+            if old_email and old_email.lower() == email_normalized:
+                logger.info(f"ℹ️ Email unchanged: {email_normalized}")
+                return {'updated': False, 'error': None}
+            
+            # Store normalized email
+            intent.email = email_normalized
+            collected["email"] = email_normalized
+            logger.info(f"✅ [EMAIL PROCESSING] Email collected: {email_normalized}")
+            return {'updated': True, 'error': None}
                 
         except Exception as e:
-            logger.error(f"❌ Email processing error: {e}", exc_info=True)
+            logger.error(f"❌ [EMAIL PROCESSING] Email processing error: {e}", exc_info=True)
             return {'updated': False, 'error': 'Email validation failed'}
     
     def process_date_field(
