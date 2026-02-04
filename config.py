@@ -78,3 +78,16 @@ CORS_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:5174",
 ]
+
+# ----------------------
+# Cloudinary Configuration (ADDED)
+# ----------------------
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+
+# ----------------------
+# File Upload Configuration (ADDED)
+# ----------------------
+MAX_FILE_SIZE_MB = 5  # Maximum file size in MB
+ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/jpg", "image/webp"]

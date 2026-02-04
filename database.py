@@ -14,6 +14,7 @@ booking_collection = db["bookings"]
 admin_collection = db["admins"]
 reset_token_collection = db["reset_tokens"]
 knowledge_collection = db["knowledge_base"]
+event_collection = db["events"]  # ADDED: Events collection
 
 # ----------------------
 # Create Indexes
@@ -36,7 +37,15 @@ def create_indexes():
     knowledge_collection.create_index("is_active")
     knowledge_collection.create_index("created_at")
     knowledge_collection.create_index([("language", 1), ("is_active", 1)])
-    knowledge_collection.create_index([("language", 1), ("category", 1), ("is_active", 1)])
+    
+    # Events - common queries (ADDED)
+    event_collection.create_index("created_at")
+    event_collection.create_index("status")
+    event_collection.create_index("is_active")
+    event_collection.create_index("date_from")
+    event_collection.create_index("date_to")
+    event_collection.create_index([("status", 1), ("is_active", 1)])
+    event_collection.create_index([("date_from", 1), ("date_to", 1)])
 
     print(f"Database connected: {MONGO_URI}")
 
