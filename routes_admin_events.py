@@ -294,10 +294,12 @@ async def get_event_by_id(
 @router.put("/{event_id}", response_model=dict)
 async def update_event(
     event_id: str,
-    event_update: EventUpdate,
+    event_data: str = Form(...),
+    main_poster: Optional[UploadFile] = File(None),
+    gallery_images: List[UploadFile] = File([]),
     current_admin: dict = Depends(get_current_admin)
 ):
-    """Update event details"""
+    """Update event with optional new images"""
     try:
         from bson import ObjectId
         
@@ -309,36 +311,103 @@ async def update_event(
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
         
-        # Prepare update data - exclude unset values
-        update_data = event_update.dict(exclude_unset=True)
+        # Parse event data
+        event_dict = json.loads(event_data)
         
-        # Handle date parsing if provided - CONVERT TO DATETIME FOR MONGODB
-        if 'date_from' in update_data:
-            if isinstance(update_data['date_from'], str):
-                update_data['date_from'] = parse_date_to_datetime(update_data['date_from'])
-            elif isinstance(update_data['date_from'], date):
-                # Convert date to datetime
-                update_data['date_from'] = datetime.combine(update_data['date_from'], datetime.min.time())
-            elif isinstance(update_data['date_from'], datetime):
-                # Already datetime, keep as is
-                pass
+        # Prepare update data
+        update_data = {}
         
-        if 'date_to' in update_data:
-            if isinstance(update_data['date_to'], str):
-                update_data['date_to'] = parse_date_to_datetime(update_data['date_to'])
-            elif isinstance(update_data['date_to'], date):
-                # Convert date to datetime
-                update_data['date_to'] = datetime.combine(update_data['date_to'], datetime.min.time())
-            elif isinstance(update_data['date_to'], datetime):
-                # Already datetime, keep as is
-                pass
+        # Handle basic fields
+        if 'title' in event_dict:
+            update_data['title'] = event_dict['title']
+        if 'bio' in event_dict:
+            update_data['bio'] = event_dict['bio']
+        if 'time_from' in event_dict:
+            update_data['time_from'] = event_dict['time_from']
+        if 'time_to' in event_dict:
+            update_data['time_to'] = event_dict['time_to']
+        if 'location' in event_dict:
+            update_data['location'] = event_dict['location']
+        if 'location_coords' in event_dict:
+            update_data['location_coords'] = event_dict['location_coords']
+        if 'total_seats' in event_dict:
+            update_data['total_seats'] = event_dict['total_seats']
+        if 'is_active' in event_dict:
+            update_data['is_active'] = event_dict['is_active']
+        if 'status' in event_dict:
+            update_data['status'] = event_dict['status']
         
-        # Validate price details if provided
-        if "price_details" in update_data:
-            update_data["price_details"] = validate_price_categories(update_data["price_details"])
+        # Handle date parsing
+        if 'date_from' in event_dict:
+            update_data['date_from'] = parse_date_to_datetime(event_dict['date_from'])
+        if 'date_to' in event_dict:
+            update_data['date_to'] = parse_date_to_datetime(event_dict['date_to'])
         
-        update_data["updated_at"] = datetime.utcnow()
-        update_data["updated_by"] = current_admin["email"]
+        # Validate and update price details
+        if 'price_details' in event_dict:
+            update_data['price_details'] = validate_price_categories(event_dict['price_details'])
+        
+        # Handle main poster update
+        if main_poster:
+            # Delete old main poster if exists
+            if event.get('main_poster_public_id'):
+                try:
+                    cloudinary.uploader.destroy(event['main_poster_public_id'])
+                except Exception as e:
+                    print(f"Warning: Failed to delete old main poster: {e}")
+            
+            # Upload new main poster
+            main_poster_result = cloudinary.uploader.upload(
+                main_poster.file,
+                folder="jinnichirag/events/main",
+                resource_type="image",
+                transformation=[
+                    {"width": 1920, "crop": "limit"},
+                    {"quality": "auto"}
+                ]
+            )
+            
+            update_data['main_poster_url'] = main_poster_result["secure_url"]
+            update_data['main_poster_public_id'] = main_poster_result["public_id"]
+        elif 'main_poster_url' in event_dict:
+            # Keep existing main poster URL from event_data
+            update_data['main_poster_url'] = event_dict['main_poster_url']
+        
+        # Handle gallery images
+        existing_gallery = event_dict.get('gallery_images', [])
+        new_gallery_urls = list(existing_gallery)
+        new_gallery_public_ids = event.get('gallery_public_ids', [])[:len(existing_gallery)]
+        
+        # Upload new gallery images
+        for image in gallery_images:
+            result = cloudinary.uploader.upload(
+                image.file,
+                folder="jinnichirag/events/gallery",
+                resource_type="image",
+                transformation=[
+                    {"width": 1920, "crop": "limit"},
+                    {"quality": "auto"}
+                ]
+            )
+            new_gallery_urls.append(result["secure_url"])
+            new_gallery_public_ids.append(result["public_id"])
+        
+        # Delete removed gallery images from Cloudinary
+        old_gallery_urls = event.get('gallery_images', [])
+        old_gallery_public_ids = event.get('gallery_public_ids', [])
+        for i, old_url in enumerate(old_gallery_urls):
+            if old_url not in existing_gallery and i < len(old_gallery_public_ids):
+                try:
+                    cloudinary.uploader.destroy(old_gallery_public_ids[i])
+                except Exception as e:
+                    print(f"Warning: Failed to delete gallery image: {e}")
+        
+        update_data['gallery_images'] = new_gallery_urls
+        update_data['gallery_public_ids'] = new_gallery_public_ids
+        
+        # Add metadata
+        update_data['updated_at'] = datetime.utcnow()
+        update_data['updated_by'] = current_admin["email"]
         
         # Update in database
         result = event_collection.update_one(
@@ -356,6 +425,8 @@ async def update_event(
             "message": "Event updated successfully",
             "event": format_event(updated_event)
         }
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON data: {str(e)}")
     except HTTPException:
         raise
     except Exception as e:
