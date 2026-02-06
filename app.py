@@ -19,11 +19,10 @@ from routes_public_instagramFetch import router as instagram_router
 
 
 
-# Import your scrapers
-from tiktok_scrapper import TikTokScraper as RequestsScraper
-from tiktok_scrapper1 import TikTokScraper as PlaywrightScraper
-from tiktok_scrapper2 import TikTokScraper as CurlScraper
-from tiktok_scrapper3 import TikTokScraper as CloudScraper
+from scrapers.tiktok_scraper import TikTokScraper as RequestsScraper
+from scrapers.tiktok_scraper1 import TikTokScraper as PlaywrightScraper
+from scrapers.tiktok_scraper2 import TikTokScraper as CurlScraper
+from scrapers.tiktok_scraper3 import TikTokScraper as CloudScraper
 
 
 
