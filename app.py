@@ -14,6 +14,8 @@ from routes_admin_knowledge import router as admin_knowledge_router
 from routes_admin_analytics import router as admin_analytics_router
 from routes_admin_events import router as admin_events_router
 from routes_public_events import router as public_events_router
+from routes_public_instagramFetch import router as instagram_router
+
 
 # Import new modular agent
 from agent import AgentOrchestrator, create_agent_router
@@ -167,13 +169,15 @@ async def health():
 # Public Routes
 app.include_router(public_router)
 app.include_router(public_events_router)
+app.include_router(instagram_router)
+
 
 # Admin Routes
 app.include_router(admin_auth_router)
 app.include_router(admin_bookings_router)
 app.include_router(admin_knowledge_router)
 app.include_router(admin_analytics_router)
-app.include_router(admin_events_router)  # ADDED: Events router
+app.include_router(admin_events_router)
 
 # NOTE: Agent router is injected during lifespan startup
 

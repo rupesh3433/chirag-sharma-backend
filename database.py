@@ -14,7 +14,8 @@ booking_collection = db["bookings"]
 admin_collection = db["admins"]
 reset_token_collection = db["reset_tokens"]
 knowledge_collection = db["knowledge_base"]
-event_collection = db["events"]  # ADDED: Events collection
+event_collection = db["events"]
+instagram_reels_collection = db["instagram_reels_cache"]
 
 # ----------------------
 # Create Indexes
@@ -38,7 +39,7 @@ def create_indexes():
     knowledge_collection.create_index("created_at")
     knowledge_collection.create_index([("language", 1), ("is_active", 1)])
     
-    # Events - common queries (ADDED)
+    # Events - common queries
     event_collection.create_index("created_at")
     event_collection.create_index("status")
     event_collection.create_index("is_active")
@@ -46,8 +47,14 @@ def create_indexes():
     event_collection.create_index("date_to")
     event_collection.create_index([("status", 1), ("is_active", 1)])
     event_collection.create_index([("date_from", 1), ("date_to", 1)])
+    
+    # Instagram reels cache - common queries
+    instagram_reels_collection.create_index("username")
+    instagram_reels_collection.create_index("cached_at")
+    instagram_reels_collection.create_index([("username", 1), ("cached_at", -1)])
 
-    print(f"Database connected: {MONGO_URI}")
+    print(f"✅ Database connected: {MONGO_URI}")
+    print(f"✅ Indexes created successfully")
 
 # Initialize indexes on module import
 create_indexes()

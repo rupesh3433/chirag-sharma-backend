@@ -91,3 +91,8 @@ CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
 # ----------------------
 MAX_FILE_SIZE_MB = 5  # Maximum file size in MB
 ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/jpg", "image/webp"]
+
+
+# Instagram Fetching API
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST")
