@@ -36,10 +36,12 @@ try:
         w='majority'  # Write concern: majority of nodes
     )
     
-    # Test connection
-    client.admin.command('ping')
-    logger.info("✅ MongoDB connection successful")
-    
+    try:
+        client.admin.command("ping")
+        logger.info("✅ MongoDB connection successful")
+    except Exception as e:
+        logger.error(f"❌ MongoDB ping failed (continuing without crash): {e}")
+
     # Get database
     db = client[MONGODB_DB_NAME]
     logger.info(f"✅ Using database: {MONGODB_DB_NAME}")
