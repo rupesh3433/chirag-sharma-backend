@@ -16,6 +16,8 @@ from routes_admin_analytics import router as admin_analytics_router
 from routes_admin_events import router as admin_events_router
 from routes_public_events import router as public_events_router
 from routes_public_instagramFetch import router as instagram_router
+from routes_public_tiktokFetch import router as tiktok_router
+
 
 
 # Import new modular agent
@@ -172,6 +174,8 @@ async def health():
 app.include_router(public_router)
 app.include_router(public_events_router)
 app.include_router(instagram_router)
+app.include_router(tiktok_router)
+
 
 
 # Admin Routes

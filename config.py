@@ -8,7 +8,8 @@ load_dotenv()
 # API Keys
 # ----------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI")
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME")
 
 # ----------------------
 # JWT Configuration
@@ -95,4 +96,5 @@ ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/jpg", "image/webp"]
 
 # Instagram Fetching API
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST")
+INSTAGRAM_RAPIDAPI_HOST = os.getenv("INSTAGRAM_RAPIDAPI_HOST")
+TIKTOK_RAPIDAPI_HOST =  os.getenv("TIKTOK_RAPIDAPI_HOST")
