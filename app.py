@@ -17,6 +17,18 @@ from routes_public_events import router as public_events_router
 from routes_public_instagramFetch import router as instagram_router
 
 
+
+
+# Import your scrapers
+from tiktok_scrapper import TikTokScraper as RequestsScraper
+from tiktok_scrapper1 import TikTokScraper as PlaywrightScraper
+from tiktok_scrapper2 import TikTokScraper as CurlScraper
+from tiktok_scrapper3 import TikTokScraper as CloudScraper
+
+
+
+
+
 # Import new modular agent
 from agent import AgentOrchestrator, create_agent_router
 
@@ -161,6 +173,88 @@ async def health():
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+
+
+
+
+
+
+
+# Instantiate scrapers ONCE (important for Render)
+requests_scraper = RequestsScraper()
+playwright_scraper = PlaywrightScraper()
+curl_scraper = CurlScraper()
+cloud_scraper = CloudScraper()
+
+
+def run_scraper(scraper, username: str) -> Dict[str, Any]:
+    """
+    Shared execution wrapper for all scrapers.
+    """
+    try:
+        result = scraper.scrape_profile(username)
+
+        if not result or result.get("user") is None:
+            raise HTTPException(
+                status_code=404,
+                detail=result.get("error", "Profile unavailable or blocked")
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
+# ============================
+# TEST ENDPOINTS
+# ============================
+
+@app.get("/test/requests/{username}")
+def test_requests_scraper(username: str):
+    """
+    Test scraper using requests
+    """
+    return run_scraper(requests_scraper, username)
+
+
+@app.get("/test/playwright/{username}")
+def test_playwright_scraper(username: str):
+    """
+    Test scraper using Playwright (Chromium)
+    """
+    return run_scraper(playwright_scraper, username)
+
+
+@app.get("/test/curl/{username}")
+def test_curl_scraper(username: str):
+    """
+    Test scraper using system curl
+    """
+    return run_scraper(curl_scraper, username)
+
+
+@app.get("/test/cloudscraper/{username}")
+def test_cloudscraper_scraper(username: str):
+    """
+    Test scraper using cloudscraper
+    """
+    return run_scraper(cloud_scraper, username)
+
+
+
+
+
+
+
 
 # ----------------------
 # Include Routers
