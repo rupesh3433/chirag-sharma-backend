@@ -1,7 +1,10 @@
 # routes_public_instagramFetch.py
 # ============================================================
-# PRODUCTION-GRADE INSTAGRAM FETCH - FINAL VERSION WITH ATOMIC LOCKS
+# PRODUCTION-GRADE INSTAGRAM FETCH - PROFILE-CENTRIC ARCHITECTURE
 # ============================================================
+# ✅ Profile-centric architecture (matches TikTok)
+# ✅ /profile is single source of truth
+# ✅ /reels is READ-ONLY legacy endpoint
 # ✅ Atomic refresh locks (unique index enforced)
 # ✅ Lock ownership validation
 # ✅ Schema versioning
@@ -11,10 +14,17 @@
 # ✅ Async-safe Cloudinary cleanup
 # ✅ MongoDB cache with logical TTL (2 days)
 # ✅ Safe fallback strategies
+# ✅ UTC time everywhere
+# ✅ Concurrency-safe retry queue
+# ✅ TTL math correctness
+# ✅ Namespaced Cloudinary IDs
+# ✅ Safe cleanup ordering
+# ✅ Fixed lock release pattern
+# ✅ Async retry queue processing
 # ============================================================
 
 from fastapi import APIRouter, Query, BackgroundTasks
-import requests
+import httpx
 import logging
 import time
 from typing import Dict, Any, List, Optional
@@ -24,6 +34,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import cloudinary
 import cloudinary.uploader
+from pymongo import ReturnDocument
 
 from config import (
     RAPIDAPI_KEY, 
@@ -62,9 +73,11 @@ router = APIRouter(
 # ------------------------------------------------------------
 DEFAULT_INSTAGRAM_USERNAME = "_jinniechiragmua"  # Default username
 CACHE_TTL_DAYS = 2  # Refresh every 2 days
+CACHE_TTL_SECONDS = CACHE_TTL_DAYS * 86400  # Exact TTL in seconds
 MAX_REELS = 20  # Maximum reels per request
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 60
+RETRY_RECLAIM_MINUTES = 10  # Reclaim stuck processing items after 10 minutes
 
 # ------------------------------------------------------------
 # CLOUDINARY CONFIG
@@ -79,8 +92,18 @@ if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
 else:
     logger.warning("⚠️ Cloudinary not configured - Instagram thumbnails will not be uploaded")
 
-# Thread pool for async Cloudinary operations
-cloudinary_executor = ThreadPoolExecutor(max_workers=5)
+# ------------------------------------------------------------
+# LAZY CLOUDINARY EXECUTOR
+# ------------------------------------------------------------
+_cloudinary_executor = None
+
+def get_cloudinary_executor():
+    """Get or create the Cloudinary thread pool executor."""
+    global _cloudinary_executor
+    if _cloudinary_executor is None:
+        _cloudinary_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="cloudinary-instagram")
+        logger.info("✅ Instagram Cloudinary executor initialized")
+    return _cloudinary_executor
 
 # ------------------------------------------------------------
 # METRICS TRACKING
@@ -113,7 +136,7 @@ class MetricsTracker:
                 "duration_seconds": round(duration_seconds, 2),
                 "success": success,
                 "error": error,
-                "timestamp": datetime.now()
+                "timestamp": datetime.utcnow()
             }
             
             instagram_metrics_collection.insert_one(metric)
@@ -131,7 +154,7 @@ class MetricsTracker:
                 "public_id": public_id,
                 "success": success,
                 "attempts": attempts,
-                "timestamp": datetime.now()
+                "timestamp": datetime.utcnow()
             }
             
             instagram_metrics_collection.insert_one(metric)
@@ -146,48 +169,90 @@ class CloudinaryRetryQueue:
     
     @staticmethod
     def add_failed_delete(username: str, public_id: str, reel_code: str, error: str):
-        """Add a failed delete to the retry queue."""
+        """Add a failed delete to the retry queue (idempotent)."""
         try:
-            retry_item = {
-                "username": username,
-                "public_id": public_id,
-                "reel_code": reel_code,
-                "status": "pending",
-                "retry_count": 0,
-                "last_error": error,
-                "created_at": datetime.now(),
-                "next_retry_at": datetime.now() + timedelta(seconds=RETRY_DELAY_SECONDS)
-            }
+            now = datetime.utcnow()
             
-            instagram_retry_queue_collection.insert_one(retry_item)
+            instagram_retry_queue_collection.update_one(
+                {
+                    "username": username,
+                    "public_id": public_id
+                },
+                {
+                    "$setOnInsert": {
+                        "username": username,
+                        "public_id": public_id,
+                        "reel_code": reel_code,
+                        "status": "pending",
+                        "retry_count": 0,
+                        "created_at": now
+                    },
+                    "$set": {
+                        "last_error": error,
+                        "next_retry_at": now + timedelta(seconds=RETRY_DELAY_SECONDS)
+                    }
+                },
+                upsert=True
+            )
             logger.info(f"📥 Added to Instagram retry queue: {public_id}")
         except Exception as e:
             logger.error(f"❌ Error adding to Instagram retry queue: {e}")
     
     @staticmethod
-    def process_retry_queue(background: bool = True) -> Dict[str, int]:
+    async def process_retry_queue_async() -> Dict[str, int]:
         """
-        Process pending items in the retry queue.
+        Process pending items in the retry queue with atomic operations (ASYNC).
         Returns dict with success/failure counts.
         """
         try:
-            # Find pending items ready for retry
-            pending_items = instagram_retry_queue_collection.find({
-                "status": "pending",
-                "retry_count": {"$lt": MAX_RETRY_ATTEMPTS},
-                "next_retry_at": {"$lte": datetime.now()}
-            })
-            
             success_count = 0
             failed_count = 0
             
-            for item in pending_items:
+            loop = asyncio.get_event_loop()
+            executor = get_cloudinary_executor()
+            
+            # Process items one-by-one using atomic findOneAndUpdate
+            while True:
+                now = datetime.utcnow()
+                reclaim_threshold = now - timedelta(minutes=RETRY_RECLAIM_MINUTES)
+                
+                # Atomic claim: find pending item OR stuck processing item
+                item = instagram_retry_queue_collection.find_one_and_update(
+                    {
+                        "$or": [
+                            {
+                                "status": "pending",
+                                "retry_count": {"$lt": MAX_RETRY_ATTEMPTS},
+                                "next_retry_at": {"$lte": now}
+                            },
+                            {
+                                "status": "processing",
+                                "processing_at": {"$lt": reclaim_threshold}
+                            }
+                        ]
+                    },
+                    {
+                        "$set": {
+                            "status": "processing",
+                            "processing_at": now
+                        }
+                    },
+                    return_document=ReturnDocument.AFTER
+                )
+                
+                if not item:
+                    # No more items to process
+                    break
+                
                 public_id = item["public_id"]
                 retry_count = item["retry_count"]
                 
                 try:
-                    # Attempt to delete
-                    result = cloudinary.uploader.destroy(public_id, resource_type="image")
+                    # Attempt to delete (run in executor to avoid blocking)
+                    def _delete():
+                        return cloudinary.uploader.destroy(public_id, resource_type="image")
+                    
+                    result = await loop.run_in_executor(executor, _delete)
                     
                     if result.get("result") in ["ok", "not found"]:
                         # Success - remove from queue
@@ -217,7 +282,7 @@ class CloudinaryRetryQueue:
                                     "status": "failed",
                                     "retry_count": new_retry_count,
                                     "last_error": str(e),
-                                    "failed_at": datetime.now()
+                                    "failed_at": datetime.utcnow()
                                 }
                             }
                         )
@@ -236,9 +301,10 @@ class CloudinaryRetryQueue:
                             {"_id": item["_id"]},
                             {
                                 "$set": {
+                                    "status": "pending",
                                     "retry_count": new_retry_count,
                                     "last_error": str(e),
-                                    "next_retry_at": datetime.now() + timedelta(seconds=next_retry_delay)
+                                    "next_retry_at": datetime.utcnow() + timedelta(seconds=next_retry_delay)
                                 }
                             }
                         )
@@ -258,7 +324,7 @@ class CloudinaryRetryQueue:
 # ------------------------------------------------------------
 # ASYNC-SAFE CLOUDINARY OPERATIONS
 # ------------------------------------------------------------
-async def upload_thumbnail_async(thumbnail_url: str, reel_code: str) -> Optional[Dict[str, str]]:
+async def upload_thumbnail_async(thumbnail_url: str, reel_code: str, username: str) -> Optional[Dict[str, str]]:
     """
     Upload Instagram thumbnail to Cloudinary asynchronously.
     Returns dict with 'url' and 'public_id' keys, or None if upload fails.
@@ -268,13 +334,16 @@ async def upload_thumbnail_async(thumbnail_url: str, reel_code: str) -> Optional
         return None
     
     loop = asyncio.get_event_loop()
+    executor = get_cloudinary_executor()
     
     def _upload():
         try:
+            # Namespaced public_id to prevent collisions
+            public_id = f"instagram/{username}/reel_{reel_code}"
+            
             result = cloudinary.uploader.upload(
                 thumbnail_url,
-                folder="instagram_reels",
-                public_id=f"reel_{reel_code}",
+                public_id=public_id,
                 overwrite=True,
                 resource_type="image",
                 transformation=[
@@ -295,7 +364,7 @@ async def upload_thumbnail_async(thumbnail_url: str, reel_code: str) -> Optional
             logger.error(f"❌ Failed to upload Instagram thumbnail to Cloudinary for {reel_code}: {e}")
             return None
     
-    return await loop.run_in_executor(cloudinary_executor, _upload)
+    return await loop.run_in_executor(executor, _upload)
 
 
 async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, Any]], username: str) -> Dict[str, int]:
@@ -321,6 +390,7 @@ async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, A
     logger.info(f"🗑️ Starting async Cloudinary cleanup for {len(reels)} old Instagram reels...")
     
     loop = asyncio.get_event_loop()
+    executor = get_cloudinary_executor()
     
     async def _delete_single(reel: Dict[str, Any]) -> Dict[str, Any]:
         cloudinary_data = reel.get("cloudinary")
@@ -358,7 +428,7 @@ async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, A
                     "reel_code": reel.get("code")
                 }
         
-        return await loop.run_in_executor(cloudinary_executor, _delete)
+        return await loop.run_in_executor(executor, _delete)
     
     # Delete all thumbnails concurrently
     tasks = [_delete_single(reel) for reel in reels]
@@ -391,126 +461,147 @@ async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, A
 # HELPER FUNCTIONS
 # ------------------------------------------------------------
 def extract_reel_data(media_item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Extract reel data from a media item, handling different structures."""
+    """Extract reel data from a media item, handling different structures with defensive guards."""
     
-    # Get the actual media data (could be nested or direct)
-    media_data = media_item.get("media", media_item)
-    
-    # Check if this is a video/reel
-    media_type = media_data.get("media_type")
-    product_type = media_data.get("product_type")
-    
-    # Accept reels: media_type 2 (video) or product_type "clips"
-    is_reel = (
-        media_type == 2 or 
-        product_type == "clips" or 
-        media_data.get("is_video") is True or
-        (media_type == 8 and product_type == "clips")  # Carousel with clips
-    )
-    
-    if not is_reel:
-        return None
-    
-    # Get the reel code/shortcode
-    code = media_data.get("code") or media_data.get("shortcode")
-    
-    if not code:
-        logger.warning("⚠️ No code/shortcode found for reel")
-        return None
-    
-    # Get caption
-    caption = ""
-    caption_obj = media_data.get("caption")
-    if caption_obj:
-        if isinstance(caption_obj, dict):
-            caption = caption_obj.get("text", "")
-        elif isinstance(caption_obj, str):
-            caption = caption_obj
-    
-    # Truncate caption for title
-    title = caption[:120] + "..." if len(caption) > 120 else caption
-    if not title:
-        title = "Instagram Reel"
-    
-    # Extract thumbnail - try multiple locations
-    thumbnail = None
-    
-    # Method 1: Try image_versions2.candidates (highest quality first)
-    if "image_versions2" in media_data:
-        img_versions = media_data["image_versions2"]
-        if isinstance(img_versions, dict) and "candidates" in img_versions:
-            candidates = img_versions["candidates"]
-            if candidates and isinstance(candidates, list) and len(candidates) > 0:
-                for candidate in candidates:
-                    if candidate.get("url"):
-                        thumbnail = candidate["url"]
+    try:
+        # Get the actual media data (could be nested or direct)
+        media_data = media_item.get("media", media_item)
+        
+        if not isinstance(media_data, dict):
+            logger.debug("⏭️ Media data is not a dict, skipping")
+            return None
+        
+        # Check if this is a video/reel
+        media_type = media_data.get("media_type")
+        product_type = media_data.get("product_type")
+        
+        # Accept reels: media_type 2 (video) or product_type "clips"
+        is_reel = (
+            media_type == 2 or 
+            product_type == "clips" or 
+            media_data.get("is_video") is True or
+            (media_type == 8 and product_type == "clips")  # Carousel with clips
+        )
+        
+        if not is_reel:
+            return None
+        
+        # Get the reel code/shortcode
+        code = media_data.get("code") or media_data.get("shortcode")
+        
+        if not code:
+            logger.warning("⚠️ No code/shortcode found for reel")
+            return None
+        
+        # Get caption with defensive guards
+        caption = ""
+        caption_obj = media_data.get("caption")
+        if caption_obj:
+            if isinstance(caption_obj, dict):
+                caption = caption_obj.get("text", "")
+            elif isinstance(caption_obj, str):
+                caption = caption_obj
+        
+        # Truncate caption for title
+        title = caption[:120] + "..." if len(caption) > 120 else caption
+        if not title:
+            title = "Instagram Reel"
+        
+        # Extract thumbnail - try multiple locations with defensive guards
+        thumbnail = None
+        
+        # Method 1: Try image_versions2.candidates (highest quality first)
+        if "image_versions2" in media_data:
+            img_versions = media_data["image_versions2"]
+            if isinstance(img_versions, dict) and "candidates" in img_versions:
+                candidates = img_versions["candidates"]
+                if candidates and isinstance(candidates, list) and len(candidates) > 0:
+                    for candidate in candidates:
+                        if isinstance(candidate, dict) and candidate.get("url"):
+                            thumbnail = candidate["url"]
+                            break
+        
+        # Method 2: Try thumbnail_url field
+        if not thumbnail:
+            thumbnail = media_data.get("thumbnail_url")
+        
+        # Method 3: Try video_versions (first frame)
+        if not thumbnail and "video_versions" in media_data:
+            video_versions = media_data["video_versions"]
+            if video_versions and isinstance(video_versions, list) and len(video_versions) > 0:
+                for version in video_versions:
+                    if isinstance(version, dict) and version.get("url"):
+                        thumbnail = version["url"]
                         break
-    
-    # Method 2: Try thumbnail_url field
-    if not thumbnail:
-        thumbnail = media_data.get("thumbnail_url")
-    
-    # Method 3: Try video_versions (first frame)
-    if not thumbnail and "video_versions" in media_data:
-        video_versions = media_data["video_versions"]
-        if video_versions and isinstance(video_versions, list) and len(video_versions) > 0:
-            for version in video_versions:
-                if version.get("url"):
-                    thumbnail = version["url"]
-                    break
-    
-    # Method 4: Try image_versions (old structure)
-    if not thumbnail and "image_versions" in media_data:
-        image_versions = media_data["image_versions"]
-        if image_versions and isinstance(image_versions, list) and len(image_versions) > 0:
-            thumbnail = image_versions[0].get("url")
-    
-    if not thumbnail:
-        logger.warning(f"⚠️ No thumbnail found for reel {code}")
+        
+        # Method 4: Try image_versions (old structure)
+        if not thumbnail and "image_versions" in media_data:
+            image_versions = media_data["image_versions"]
+            if image_versions and isinstance(image_versions, list) and len(image_versions) > 0:
+                first_version = image_versions[0]
+                if isinstance(first_version, dict):
+                    thumbnail = first_version.get("url")
+        
+        if not thumbnail:
+            logger.warning(f"⚠️ No thumbnail found for reel {code}")
+            return None
+        
+        # Get ID with defensive guard
+        reel_id = media_data.get("id", f"reel_{code}")
+        if isinstance(reel_id, dict):
+            reel_id = reel_id.get("id", f"reel_{code}")
+        
+        # Build URLs
+        post_url = f"https://www.instagram.com/reel/{code}/"
+        embed_url = f"https://www.instagram.com/reel/{code}/embed"
+        
+        # Get engagement metrics with defensive guards
+        like_count = media_data.get("like_count", 0)
+        comment_count = media_data.get("comment_count", 0)
+        play_count = media_data.get("play_count", 0)
+        
+        # If like_count is a dict with "count" key
+        if isinstance(like_count, dict):
+            like_count = like_count.get("count", 0)
+        
+        # If comment_count is a dict with "count" key
+        if isinstance(comment_count, dict):
+            comment_count = comment_count.get("count", 0)
+        
+        # Ensure counts are integers
+        try:
+            like_count = int(like_count) if like_count is not None else 0
+            comment_count = int(comment_count) if comment_count is not None else 0
+            play_count = int(play_count) if play_count is not None else 0
+        except (ValueError, TypeError):
+            like_count = 0
+            comment_count = 0
+            play_count = 0
+        
+        # Create reel object
+        reel = {
+            "id": str(reel_id),
+            "code": code,
+            "title": title,
+            "caption": caption[:200] + "..." if len(caption) > 200 else caption,
+            "thumbnail": thumbnail,
+            "cloudinary": None,  # Will be set after upload (dict with url + public_id)
+            "postUrl": post_url,
+            "embedUrl": embed_url,
+            "likeCount": like_count,
+            "commentCount": comment_count,
+            "playCount": play_count,
+            "takenAt": media_data.get("taken_at", 0),
+            "mediaType": media_type,
+            "productType": product_type
+        }
+        
+        logger.info(f"🎉 Successfully extracted reel: {code} (likes: {like_count}, plays: {play_count})")
+        return reel
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting reel data: {e}")
         return None
-    
-    # Get ID
-    reel_id = media_data.get("id", f"reel_{code}")
-    if isinstance(reel_id, dict):
-        reel_id = reel_id.get("id", f"reel_{code}")
-    
-    # Build URLs
-    post_url = f"https://www.instagram.com/reel/{code}/"
-    embed_url = f"https://www.instagram.com/reel/{code}/embed"
-    
-    # Get engagement metrics
-    like_count = media_data.get("like_count", 0)
-    comment_count = media_data.get("comment_count", 0)
-    play_count = media_data.get("play_count", 0)
-    
-    # If like_count is a dict with "count" key
-    if isinstance(like_count, dict):
-        like_count = like_count.get("count", 0)
-    
-    # If comment_count is a dict with "count" key
-    if isinstance(comment_count, dict):
-        comment_count = comment_count.get("count", 0)
-    
-    # Create reel object
-    reel = {
-        "id": str(reel_id),
-        "code": code,
-        "title": title,
-        "caption": caption[:200] + "..." if len(caption) > 200 else caption,
-        "thumbnail": thumbnail,
-        "cloudinary": None,  # Will be set after upload (dict with url + public_id)
-        "postUrl": post_url,
-        "embedUrl": embed_url,
-        "likeCount": like_count,
-        "commentCount": comment_count,
-        "playCount": play_count,
-        "takenAt": media_data.get("taken_at", 0),
-        "mediaType": media_type,
-        "productType": product_type
-    }
-    
-    logger.info(f"🎉 Successfully extracted reel: {code} (likes: {like_count}, plays: {play_count})")
-    return reel
 
 
 async def fetch_reels_from_rapidapi_async(username: str, count: int = 20) -> List[Dict[str, Any]]:
@@ -533,12 +624,19 @@ async def fetch_reels_from_rapidapi_async(username: str, count: int = 20) -> Lis
     try:
         logger.info(f"🚀 Fetching Instagram reels from RapidAPI for @{username}")
         
-        # Fetch from API (sync in executor)
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.get(url, headers=headers, params=params, timeout=30)
-        )
+        # Fetch from API (async)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+        except httpx.TimeoutException:
+            logger.error("⏱️ Instagram reels request timed out")
+            return []
+        except httpx.ConnectError:
+            logger.error("🔌 Instagram reels connection error")
+            return []
+        except httpx.RequestError as e:
+            logger.error(f"🌐 Instagram reels request error: {e}")
+            return []
         
         logger.info(f"📡 Instagram reels response status: {response.status_code}")
         
@@ -554,32 +652,39 @@ async def fetch_reels_from_rapidapi_async(username: str, count: int = 20) -> Lis
             logger.error(f"❌ Failed to parse Instagram JSON response: {e}")
             return []
         
-        # Handle different response structures
+        # Handle different response structures with defensive guards
         items = []
         
-        if "data" in payload:
-            data = payload["data"]
+        if isinstance(payload, dict):
+            if "data" in payload:
+                data = payload["data"]
+                
+                if isinstance(data, dict):
+                    if "data" in data and isinstance(data["data"], dict):
+                        items = data["data"].get("items", [])
+                    elif "items" in data:
+                        items = data["items"]
+                elif isinstance(data, list):
+                    items = data
             
-            if isinstance(data, dict):
-                if "data" in data and isinstance(data["data"], dict):
-                    items = data["data"].get("items", [])
-                elif "items" in data:
-                    items = data["items"]
-            elif isinstance(data, list):
-                items = data
+            elif "items" in payload and isinstance(payload["items"], list):
+                items = payload["items"]
+            
+            elif "data" in payload and isinstance(payload.get("data"), dict):
+                user_data = payload["data"]
+                if "user" in user_data and isinstance(user_data["user"], dict):
+                    user = user_data["user"]
+                    if "edge_owner_to_timeline_media" in user:
+                        edges = user["edge_owner_to_timeline_media"].get("edges", [])
+                        items = [edge.get("node", {}) for edge in edges if isinstance(edge, dict) and edge.get("node")]
         
-        elif "items" in payload and isinstance(payload["items"], list):
-            items = payload["items"]
-        
-        elif "data" in payload and "user" in payload["data"]:
-            user = payload["data"]["user"]
-            if "edge_owner_to_timeline_media" in user:
-                edges = user["edge_owner_to_timeline_media"].get("edges", [])
-                items = [edge.get("node", {}) for edge in edges if edge.get("node")]
+        if not isinstance(items, list):
+            logger.warning(f"⚠️ Unexpected items structure: {type(items)}")
+            items = []
         
         logger.info(f"🔍 Processing {len(items)} Instagram items...")
         
-        # Process each item
+        # Process each item with defensive error handling
         for i, item in enumerate(items[:count]):  # Limit to requested count
             try:
                 reel_data = extract_reel_data(item)
@@ -594,7 +699,7 @@ async def fetch_reels_from_rapidapi_async(username: str, count: int = 20) -> Lis
         if reels:
             logger.info(f"☁️ Uploading {len(reels)} Instagram thumbnails to Cloudinary...")
             upload_tasks = [
-                upload_thumbnail_async(reel["thumbnail"], reel["code"])
+                upload_thumbnail_async(reel["thumbnail"], reel["code"], username)
                 for reel in reels
             ]
             upload_results = await asyncio.gather(*upload_tasks)
@@ -609,10 +714,6 @@ async def fetch_reels_from_rapidapi_async(username: str, count: int = 20) -> Lis
         
         logger.info(f"🎯 Successfully extracted {len(reels)} Instagram reels")
         
-    except requests.exceptions.Timeout:
-        logger.error("⏱️ Request timeout - Instagram RapidAPI took too long to respond")
-    except requests.exceptions.ConnectionError:
-        logger.error("🔌 Connection error - Could not connect to Instagram RapidAPI")
     except Exception as e:
         logger.error(f"❌ Unexpected error fetching Instagram reels: {e}")
     
@@ -627,8 +728,9 @@ def get_cached_reels(username: str) -> Optional[Dict[str, Any]]:
         if cache_doc:
             cached_at = cache_doc.get("cached_at")
             if cached_at:
-                age_days = (datetime.now() - cached_at).days
-                logger.info(f"📦 Found cached Instagram reels for @{username} (age: {age_days} days)")
+                age_seconds = (datetime.utcnow() - cached_at).total_seconds()
+                age_days = age_seconds / 86400
+                logger.info(f"📦 Found cached Instagram reels for @{username} (age: {age_days:.2f} days)")
                 return cache_doc
         
         return None
@@ -646,23 +748,25 @@ def should_refresh_cache(cache_doc: Optional[Dict[str, Any]]) -> bool:
     if not cached_at:
         return True
     
-    age = datetime.now() - cached_at
-    should_refresh = age > timedelta(days=CACHE_TTL_DAYS)
+    age_seconds = (datetime.utcnow() - cached_at).total_seconds()
+    should_refresh = age_seconds > CACHE_TTL_SECONDS
     
     if should_refresh:
-        logger.info(f"🔄 Instagram cache is {age.days} days old, refreshing...")
+        age_days = age_seconds / 86400
+        logger.info(f"🔄 Instagram cache is {age_days:.2f} days old, refreshing...")
     
     return should_refresh
 
 
-def save_reels_to_cache(username: str, reels: List[Dict[str, Any]]) -> bool:
-    """Save reels to MongoDB cache using atomic upsert."""
+def save_reels_to_cache(username: str, user_data: Dict[str, Any], reels: List[Dict[str, Any]]) -> bool:
+    """Save reels and user data to MongoDB cache using atomic upsert."""
     try:
         cache_doc = {
             "username": username,
-            "schema_version": 1,  # ← NEW: Schema versioning
+            "schema_version": 1,
+            "user": user_data,
             "reels": reels,
-            "cached_at": datetime.now(),
+            "cached_at": datetime.utcnow(),
             "count": len(reels)
         }
         
@@ -683,21 +787,23 @@ def save_reels_to_cache(username: str, reels: List[Dict[str, Any]]) -> bool:
 async def refresh_cache_with_cleanup_async(
     cache_doc: Optional[Dict[str, Any]], 
     username: str,
+    fresh_user: Dict[str, Any],
     fresh_reels: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """
     Refresh cache with proper async cleanup flow.
+    CRITICAL: Save new cache FIRST, then cleanup old assets (best-effort).
     
     Returns:
         Dict with operation results and metrics
     """
     start_time = time.time()
     
-    # Step 1: Delete old Cloudinary thumbnails (async)
-    cleanup_stats = await delete_old_cloudinary_thumbnails_async(cache_doc, username)
+    # Step 1: Save new cache FIRST (authoritative)
+    save_success = save_reels_to_cache(username, fresh_user, fresh_reels)
     
-    # Step 2: Save new cache (atomic upsert - no separate delete needed)
-    save_success = save_reels_to_cache(username, fresh_reels)
+    # Step 2: Delete old Cloudinary thumbnails (async, best-effort)
+    cleanup_stats = await delete_old_cloudinary_thumbnails_async(cache_doc, username)
     
     # Calculate duration
     duration = time.time() - start_time
@@ -715,23 +821,140 @@ async def refresh_cache_with_cleanup_async(
     }
 
 
+async def fetch_instagram_user_info_async(username: str) -> Dict[str, Any]:
+    """
+    Fetch Instagram user profile info (bio, followers, following, posts) using async HTTP.
+
+    Uses RapidAPI Instagram user info endpoint.
+    Safe, strict, production-ready.
+    """
+
+    logger.info(f"🚀 Fetching Instagram user info for @{username}")
+
+    if not INSTAGRAM_RAPIDAPI_HOST or not RAPIDAPI_KEY:
+        raise RuntimeError("Instagram RapidAPI credentials not configured")
+
+    url = f"https://{INSTAGRAM_RAPIDAPI_HOST}/userinfo/"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": INSTAGRAM_RAPIDAPI_HOST
+    }
+    params = {
+        "username_or_id": username
+    }
+
+    # ------------------------------------------------------------
+    # ASYNC REQUEST
+    # ------------------------------------------------------------
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+    except httpx.TimeoutException as e:
+        logger.error("⏱️ Instagram userinfo request timed out")
+        raise RuntimeError("Instagram API timeout") from e
+    except httpx.ConnectError as e:
+        logger.error("🔌 Instagram API connection error")
+        raise RuntimeError("Instagram API connection error") from e
+    except httpx.RequestError as e:
+        logger.error(f"🌐 Instagram API request error: {e}")
+        raise RuntimeError("Instagram API request failure") from e
+
+    logger.info(
+        f"📡 Instagram userinfo response | "
+        f"status={response.status_code} url={response.url}"
+    )
+
+    if response.status_code != 200:
+        logger.error(
+            f"❌ Instagram userinfo HTTP failure | "
+            f"status={response.status_code} body={response.text[:300]}"
+        )
+        raise RuntimeError(f"Instagram API returned HTTP {response.status_code}")
+
+    # ------------------------------------------------------------
+    # JSON PARSING
+    # ------------------------------------------------------------
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as e:
+        logger.error(
+            f"❌ Invalid JSON from Instagram userinfo | "
+            f"body={response.text[:300]}"
+        )
+        raise RuntimeError("Invalid JSON from Instagram API") from e
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        logger.error(f"❌ Missing data object in Instagram response: {payload}")
+        raise RuntimeError("Malformed Instagram response (data missing)")
+
+    # ------------------------------------------------------------
+    # FIELD EXTRACTION (STRICT)
+    # ------------------------------------------------------------
+    try:
+        followers = int(data.get("follower_count"))
+        following = int(data.get("following_count"))
+        posts = int(data.get("media_count"))
+    except (TypeError, ValueError) as e:
+        logger.error(
+            f"❌ Invalid Instagram stats | "
+            f"followers={data.get('follower_count')} "
+            f"following={data.get('following_count')} "
+            f"posts={data.get('media_count')}"
+        )
+        raise RuntimeError("Instagram stats missing or invalid") from e
+
+    bio = (
+        data.get("biography")
+        or data.get("biography_with_entities", {}).get("raw_text")
+        or ""
+    )
+
+    # ------------------------------------------------------------
+    # FINAL USER OBJECT (CACHE-SAFE)
+    # ------------------------------------------------------------
+    user = {
+        "username": data.get("username") or username,
+        "full_name": data.get("full_name"),
+        "bio": bio,
+        "followers_count": followers,
+        "following_count": following,
+        "posts_count": posts,
+        "is_verified": bool(data.get("is_verified", False)),
+        "profile_picture_url": (
+            data.get("profile_pic_url_hd")
+            or data.get("profile_pic_url")
+        )
+    }
+
+    logger.info(
+        "✅ Instagram user info resolved | "
+        f"@{user['username']} "
+        f"followers={followers} following={following} posts={posts}"
+    )
+
+    return user
+
 # ------------------------------------------------------------
-# MAIN ENDPOINT
+# AUTHORITATIVE ENDPOINT: /profile
 # ------------------------------------------------------------
-@router.get("/reels")
-async def fetch_latest_reels(
+@router.get("/profile")
+async def get_profile(
     username: str = Query(DEFAULT_INSTAGRAM_USERNAME, description="Instagram username"),
-    limit: int = Query(12, ge=1, le=20, description="Number of reels to return"),
+    count: int = Query(20, ge=1, le=30, description="Number of reels to fetch"),
     background_tasks: BackgroundTasks = None
 ):
     """
-    Fetch Instagram reels for a specific user.
+    Fetch Instagram profile with user info and reels.
     
-    - Uses MongoDB cache (TTL: 2 days)
-    - Atomic refresh lock prevents race conditions
-    - Graceful fallback to old cache on API failure
-    - Cloudinary thumbnail management
-    - Returns reels data matching exact schema
+    AUTHORITATIVE ENDPOINT - SINGLE SOURCE OF TRUTH
+    - This is the ONLY endpoint that calls RapidAPI
+    - This is the ONLY endpoint that uploads to Cloudinary
+    - This is the ONLY endpoint that writes to cache
+    - This is the ONLY endpoint that acquires refresh locks
+    
+    Returns:
+        Complete profile data with user info and reels
     """
     
     # Try to get from cache
@@ -740,24 +963,28 @@ async def fetch_latest_reels(
     
     # If cache is fresh, return it
     if cache_doc and not should_refresh:
+        user = cache_doc.get("user", {})
         reels = cache_doc.get("reels", [])
         cached_at = cache_doc.get("cached_at")
-        age_days = (datetime.now() - cached_at).days if cached_at else 0
+        age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 0
+        age_days = age_seconds / 86400
         
-        logger.info(f"✅ Serving {len(reels[:limit])} Instagram reels for @{username} from MongoDB cache (age: {age_days} days)")
+        logger.info(f"✅ Serving Instagram profile for @{username} from MongoDB cache (age: {age_days:.2f} days)")
         
         # Process retry queue in background
         if background_tasks:
-            background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue)
+            background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue_async)
         
         return {
             "success": True,
-            "count": len(reels[:limit]),
-            "reels": reels[:limit],
             "source": "mongodb_cache",
             "cached_at": cached_at.isoformat() if cached_at else None,
-            "cache_age_days": age_days,
-            "timestamp": datetime.now().isoformat()
+            "cache_age_days": round(age_days, 2),
+            "cache_age_seconds": round(age_seconds, 2),
+            "user": user,
+            "reels": reels[:count],
+            "metrics": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     # Cache is old or doesn't exist - try to acquire refresh lock
@@ -767,46 +994,56 @@ async def fetch_latest_reels(
         platform="Instagram"
     )
     
-    if not refresh_lock.acquire():
+    lock_acquired = refresh_lock.acquire()
+    
+    if not lock_acquired:
         # Another process is refreshing - serve old cache if available
-        if cache_doc and cache_doc.get("reels"):
-            old_reels = cache_doc.get("reels", [])
+        if cache_doc and cache_doc.get("user") and cache_doc.get("reels"):
+            user = cache_doc.get("user", {})
+            reels = cache_doc.get("reels", [])
             cached_at = cache_doc.get("cached_at")
-            age_days = (datetime.now() - cached_at).days if cached_at else 999
+            age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 999999
+            age_days = age_seconds / 86400
             
-            logger.info(f"🔒 Refresh in progress by another process, serving old Instagram cache for @{username} (age: {age_days} days)")
+            logger.info(f"🔒 Refresh in progress by another process, serving old Instagram cache for @{username} (age: {age_days:.2f} days)")
             
             return {
                 "success": True,
-                "count": len(old_reels[:limit]),
-                "reels": old_reels[:limit],
                 "source": "mongodb_cache_locked",
                 "cached_at": cached_at.isoformat() if cached_at else None,
-                "cache_age_days": age_days,
+                "cache_age_days": round(age_days, 2),
+                "cache_age_seconds": round(age_seconds, 2),
                 "message": "Refresh in progress, serving cached data",
-                "timestamp": datetime.now().isoformat()
+                "user": user,
+                "reels": reels[:count],
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
         else:
             return {
                 "success": False,
-                "count": 0,
-                "reels": [],
                 "source": "none",
                 "error": "Refresh in progress and no cache available",
-                "timestamp": datetime.now().isoformat()
+                "user": {},
+                "reels": [],
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
     
     try:
-        # Fetch fresh data with async Cloudinary uploads
-        logger.info(f"🎬 Fetching fresh Instagram reels for @{username} from RapidAPI")
+        # Fetch user info
+        logger.info(f"🎬 Fetching fresh Instagram profile for @{username} from RapidAPI")
+        user = await fetch_instagram_user_info_async(username)
+        
+        # Fetch reels with async Cloudinary uploads
         fresh_reels = await fetch_reels_from_rapidapi_async(username, MAX_REELS)
         
-        if fresh_reels:
+        if user and fresh_reels:
             # Sort by taken_at (newest first)
             fresh_reels.sort(key=lambda x: x.get("takenAt", 0), reverse=True)
             
-            # Refresh cache with async cleanup
-            refresh_stats = await refresh_cache_with_cleanup_async(cache_doc, username, fresh_reels)
+            # Refresh cache with async cleanup (save first, cleanup after)
+            refresh_stats = await refresh_cache_with_cleanup_async(cache_doc, username, user, fresh_reels)
             
             # Log metrics
             MetricsTracker.log_refresh(
@@ -820,18 +1057,20 @@ async def fetch_latest_reels(
                 success=True
             )
             
-            logger.info(f"✅ Returning {len(fresh_reels[:limit])} fresh Instagram reels for @{username}")
+            logger.info(f"✅ Returning fresh Instagram profile for @{username} with {len(fresh_reels)} reels")
             
             # Process retry queue in background
             if background_tasks:
-                background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue)
+                background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue_async)
             
             return {
                 "success": True,
-                "count": len(fresh_reels[:limit]),
-                "reels": fresh_reels[:limit],
                 "source": "rapidapi_fresh",
-                "cached_to_db": refresh_stats["save_success"],
+                "cached_at": datetime.utcnow().isoformat(),
+                "cache_age_days": 0,
+                "cache_age_seconds": 0,
+                "user": user,
+                "reels": fresh_reels[:count],
                 "metrics": {
                     "cloudinary_uploads": refresh_stats["cloudinary_uploads"],
                     "cloudinary_deletes": refresh_stats["cloudinary_deletes"],
@@ -839,22 +1078,24 @@ async def fetch_latest_reels(
                     "queued_for_retry": refresh_stats["queued_deletes"],
                     "duration_seconds": round(refresh_stats["duration"], 2)
                 },
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # API returned empty data - fallback to cache if available
-        if cache_doc and cache_doc.get("reels"):
-            old_reels = cache_doc.get("reels", [])
+        if cache_doc and cache_doc.get("user") and cache_doc.get("reels"):
+            user = cache_doc.get("user", {})
+            reels = cache_doc.get("reels", [])
             cached_at = cache_doc.get("cached_at")
-            age_days = (datetime.now() - cached_at).days if cached_at else 999
+            age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 999999
+            age_days = age_seconds / 86400
             
-            logger.warning(f"⚠️ Instagram API returned empty data, using old cache for @{username} (age: {age_days} days)")
+            logger.warning(f"⚠️ Instagram API returned empty data, using old cache for @{username} (age: {age_days:.2f} days)")
             
             # Log failed refresh
             MetricsTracker.log_refresh(
                 username=username,
                 source="mongodb_cache_fallback",
-                reels_count=len(old_reels),
+                reels_count=len(reels),
                 cloudinary_uploads=0,
                 cloudinary_deletes=0,
                 failed_deletes=0,
@@ -865,13 +1106,15 @@ async def fetch_latest_reels(
             
             return {
                 "success": True,
-                "count": len(old_reels[:limit]),
-                "reels": old_reels[:limit],
                 "source": "mongodb_cache_fallback",
                 "cached_at": cached_at.isoformat() if cached_at else None,
-                "cache_age_days": age_days,
+                "cache_age_days": round(age_days, 2),
+                "cache_age_seconds": round(age_seconds, 2),
                 "warning": "Using old cache - API returned empty data",
-                "timestamp": datetime.now().isoformat()
+                "user": user,
+                "reels": reels[:count],
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # Everything failed - return error
@@ -891,28 +1134,31 @@ async def fetch_latest_reels(
         
         return {
             "success": False,
-            "count": 0,
-            "reels": [],
             "source": "none",
-            "error": "Unable to fetch reels - API unavailable and no cache exists",
-            "timestamp": datetime.now().isoformat()
+            "error": "Unable to fetch profile - API unavailable and no cache exists",
+            "user": {},
+            "reels": [],
+            "metrics": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
         logger.error(f"❌ Error in Instagram main endpoint: {e}")
         
         # Try to fallback to cache
-        if cache_doc and cache_doc.get("reels"):
-            old_reels = cache_doc.get("reels", [])
+        if cache_doc and cache_doc.get("user") and cache_doc.get("reels"):
+            user = cache_doc.get("user", {})
+            reels = cache_doc.get("reels", [])
             cached_at = cache_doc.get("cached_at")
-            age_days = (datetime.now() - cached_at).days if cached_at else 999
+            age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 999999
+            age_days = age_seconds / 86400
             
-            logger.warning(f"⚠️ Exception occurred, using old Instagram cache for @{username} (age: {age_days} days)")
+            logger.warning(f"⚠️ Exception occurred, using old Instagram cache for @{username} (age: {age_days:.2f} days)")
             
             MetricsTracker.log_refresh(
                 username=username,
                 source="mongodb_cache_fallback",
-                reels_count=len(old_reels),
+                reels_count=len(reels),
                 cloudinary_uploads=0,
                 cloudinary_deletes=0,
                 failed_deletes=0,
@@ -923,27 +1169,89 @@ async def fetch_latest_reels(
             
             return {
                 "success": True,
-                "count": len(old_reels[:limit]),
-                "reels": old_reels[:limit],
                 "source": "mongodb_cache_fallback",
                 "cached_at": cached_at.isoformat() if cached_at else None,
-                "cache_age_days": age_days,
+                "cache_age_days": round(age_days, 2),
+                "cache_age_seconds": round(age_seconds, 2),
                 "warning": f"Using old cache - API error: {str(e)}",
-                "timestamp": datetime.now().isoformat()
+                "user": user,
+                "reels": reels[:count],
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         return {
             "success": False,
-            "count": 0,
-            "reels": [],
             "source": "none",
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "user": {},
+            "reels": [],
+            "metrics": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     finally:
-        # Always release the lock
-        refresh_lock.release()
+        # Only release if we acquired it
+        if lock_acquired:
+            refresh_lock.release()
+
+
+# ------------------------------------------------------------
+# LEGACY ENDPOINT: /reels (READ-ONLY)
+# ------------------------------------------------------------
+@router.get("/reels")
+async def fetch_latest_reels(
+    username: str = Query(DEFAULT_INSTAGRAM_USERNAME, description="Instagram username"),
+    limit: int = Query(12, ge=1, le=20, description="Number of reels to return"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    LEGACY ENDPOINT - READ-ONLY MODE
+    
+    This endpoint EXISTS ONLY to avoid breaking existing frontend code.
+    It NEVER calls RapidAPI, NEVER touches Cloudinary, NEVER writes to cache.
+    It ONLY reads from MongoDB cache.
+    
+    Frontend should migrate to /profile endpoint.
+    """
+    
+    # Only read from cache - never refresh
+    cache_doc = get_cached_reels(username)
+    
+    if cache_doc:
+        reels = cache_doc.get("reels", [])
+        cached_at = cache_doc.get("cached_at")
+        age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 0
+        age_days = age_seconds / 86400
+        
+        logger.info(f"✅ [LEGACY] Serving {len(reels[:limit])} Instagram reels for @{username} from MongoDB cache (age: {age_days:.2f} days)")
+        
+        # Process retry queue in background
+        if background_tasks:
+            background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue_async)
+        
+        return {
+            "success": True,
+            "count": len(reels[:limit]),
+            "reels": reels[:limit],
+            "source": "mongodb_cache",
+            "cached_at": cached_at.isoformat() if cached_at else None,
+            "cache_age_days": round(age_days, 2),
+            "cache_age_seconds": round(age_seconds, 2),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    # No cache available - return empty
+    logger.warning(f"⚠️ [LEGACY] No cache available for Instagram @{username}")
+    
+    return {
+        "success": False,
+        "count": 0,
+        "reels": [],
+        "source": "none",
+        "error": "No cached data available - use /profile endpoint to fetch fresh data",
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 
 # ------------------------------------------------------------
@@ -975,13 +1283,13 @@ async def get_metrics(
             "success": True,
             "count": len(metrics),
             "metrics": metrics,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -990,6 +1298,7 @@ async def get_retry_queue_status():
     """Get status of the Instagram Cloudinary retry queue."""
     try:
         pending = instagram_retry_queue_collection.count_documents({"status": "pending"})
+        processing = instagram_retry_queue_collection.count_documents({"status": "processing"})
         failed = instagram_retry_queue_collection.count_documents({"status": "failed"})
         
         recent_items = list(
@@ -1002,22 +1311,23 @@ async def get_retry_queue_status():
         # Convert ObjectId to string
         for item in recent_items:
             item["_id"] = str(item["_id"])
-            for date_field in ["created_at", "next_retry_at", "failed_at"]:
+            for date_field in ["created_at", "next_retry_at", "failed_at", "processing_at"]:
                 if date_field in item and item[date_field]:
                     item[date_field] = item[date_field].isoformat()
         
         return {
             "success": True,
             "pending_count": pending,
+            "processing_count": processing,
             "failed_count": failed,
             "recent_items": recent_items,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1025,19 +1335,19 @@ async def get_retry_queue_status():
 async def process_retry_queue_endpoint():
     """Manually trigger Instagram retry queue processing."""
     try:
-        result = CloudinaryRetryQueue.process_retry_queue(background=False)
+        result = await CloudinaryRetryQueue.process_retry_queue_async()
         return {
             "success": True,
             "processed": result["success"] + result["failed"],
             "success_count": result["success"],
             "failed_count": result["failed"],
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1051,12 +1361,13 @@ async def get_cache_status(username: str = Query(DEFAULT_INSTAGRAM_USERNAME, des
             "cached": False,
             "username": username,
             "message": "No cache found",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     cached_at = cache_doc.get("cached_at")
     reels_count = cache_doc.get("count", 0)
-    age_days = (datetime.now() - cached_at).days if cached_at else 0
+    age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 0
+    age_days = age_seconds / 86400
     needs_refresh = should_refresh_cache(cache_doc)
     
     # Check for active refresh lock
@@ -1067,11 +1378,13 @@ async def get_cache_status(username: str = Query(DEFAULT_INSTAGRAM_USERNAME, des
         "username": username,
         "count": reels_count,
         "cached_at": cached_at.isoformat() if cached_at else None,
-        "age_days": age_days,
+        "age_days": round(age_days, 2),
+        "age_seconds": round(age_seconds, 2),
         "needs_refresh": needs_refresh,
         "refresh_in_progress": refresh_lock_active,
         "ttl_days": CACHE_TTL_DAYS,
-        "timestamp": datetime.now().isoformat()
+        "ttl_seconds": CACHE_TTL_SECONDS,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 
@@ -1094,14 +1407,14 @@ async def clear_cache(username: str = Query(DEFAULT_INSTAGRAM_USERNAME, descript
             "documents_deleted": result.deleted_count,
             "cloudinary_cleaned": bool(cache_doc),
             "cloudinary_stats": cleanup_stats,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         logger.error(f"❌ Error clearing Instagram cache: {e}")
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1122,32 +1435,37 @@ async def force_refresh(
         platform="Instagram"
     )
     
-    if not refresh_lock.acquire():
+    lock_acquired = refresh_lock.acquire()
+    
+    if not lock_acquired:
         return {
             "success": False,
             "error": f"Refresh already in progress for @{username}",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     try:
         # Get old cache first for cleanup
         cache_doc = get_cached_reels(username)
         
+        # Fetch user info
+        user = await fetch_instagram_user_info_async(username)
+        
         # Fetch fresh reels
         fresh_reels = await fetch_reels_from_rapidapi_async(username, MAX_REELS)
         
-        if not fresh_reels:
+        if not user or not fresh_reels:
             return {
                 "success": False,
-                "error": "Failed to fetch Instagram reels from API",
-                "timestamp": datetime.now().isoformat()
+                "error": "Failed to fetch Instagram profile from API",
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # Sort by taken_at (newest first)
         fresh_reels.sort(key=lambda x: x.get("takenAt", 0), reverse=True)
         
-        # Refresh cache with proper cleanup
-        refresh_stats = await refresh_cache_with_cleanup_async(cache_doc, username, fresh_reels)
+        # Refresh cache with proper cleanup (save first, cleanup after)
+        refresh_stats = await refresh_cache_with_cleanup_async(cache_doc, username, user, fresh_reels)
         
         # Log metrics
         MetricsTracker.log_refresh(
@@ -1172,7 +1490,7 @@ async def force_refresh(
                 "queued_for_retry": refresh_stats["queued_deletes"],
                 "duration_seconds": round(refresh_stats["duration"], 2)
             },
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -1180,10 +1498,12 @@ async def force_refresh(
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     finally:
-        refresh_lock.release()
+        # Only release if we acquired it
+        if lock_acquired:
+            refresh_lock.release()
 
 
 @router.get("/health")
@@ -1205,9 +1525,11 @@ async def health_check():
         )
         
         if recent_cache and recent_cache.get("cached_at"):
-            age_days = (datetime.now() - recent_cache["cached_at"]).days
+            age_seconds = (datetime.utcnow() - recent_cache["cached_at"]).total_seconds()
+            age_days = age_seconds / 86400
             status = "healthy"
         else:
+            age_seconds = None
             age_days = None
             status = "degraded" if cache_count == 0 else "healthy"
         
@@ -1215,17 +1537,23 @@ async def health_check():
         active_locks = instagram_refresh_lock_collection.count_documents({})
         
         # Check retry queue
-        retry_queue_size = instagram_retry_queue_collection.count_documents({"status": "pending"})
+        retry_queue_pending = instagram_retry_queue_collection.count_documents({"status": "pending"})
+        retry_queue_processing = instagram_retry_queue_collection.count_documents({"status": "processing"})
+        retry_queue_failed = instagram_retry_queue_collection.count_documents({"status": "failed"})
         
         return {
             "status": status,
             "mongodb_connected": True,
             "cache_entries": cache_count,
-            "most_recent_cache_age_days": age_days,
+            "most_recent_cache_age_days": round(age_days, 2) if age_days is not None else None,
+            "most_recent_cache_age_seconds": round(age_seconds, 2) if age_seconds is not None else None,
             "active_refresh_locks": active_locks,
-            "retry_queue_size": retry_queue_size,
+            "retry_queue_pending": retry_queue_pending,
+            "retry_queue_processing": retry_queue_processing,
+            "retry_queue_failed": retry_queue_failed,
             "ttl_days": CACHE_TTL_DAYS,
-            "timestamp": datetime.now().isoformat()
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -1234,7 +1562,7 @@ async def health_check():
             "status": "down",
             "mongodb_connected": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1259,13 +1587,14 @@ async def get_raw_response(username: str = Query(DEFAULT_INSTAGRAM_USERNAME, des
         
         logger.info(f"🔧 Instagram debug request to: {url}")
         
-        response = requests.get(url, headers=headers, params=params, timeout=15)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
         
         debug_info = {
             "endpoint": "userreels",
             "status_code": response.status_code,
             "headers": dict(response.headers),
-            "url": response.url,
+            "url": str(response.url),
             "elapsed": str(response.elapsed)
         }
         
@@ -1310,5 +1639,5 @@ async def get_raw_response(username: str = Query(DEFAULT_INSTAGRAM_USERNAME, des
             "error": str(e),
             "rapidapi_url": f"https://{INSTAGRAM_RAPIDAPI_HOST}/userreels/" if INSTAGRAM_RAPIDAPI_HOST else "Not set",
             "rapidapi_key_present": bool(RAPIDAPI_KEY),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }

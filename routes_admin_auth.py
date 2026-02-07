@@ -10,7 +10,7 @@ from security import (
     get_current_admin
 )
 from services import send_password_reset_email
-from database import admin_collection, reset_token_collection
+from database import admin_collection, admin_reset_token_collection
 from config import PERMANENT_ADMINS
 
 router = APIRouter(prefix="/admin", tags=["Admin Authentication"])
@@ -56,7 +56,7 @@ async def admin_forgot_password(request: AdminPasswordResetRequest):
     reset_token = secrets.token_urlsafe(32)
     hashed_token = hash_password(reset_token)
     
-    reset_token_collection.insert_one({
+    admin_reset_token_collection.insert_one({
         "email": email,
         "token": hashed_token,
         "created_at": datetime.utcnow(),
@@ -79,7 +79,7 @@ async def admin_forgot_password(request: AdminPasswordResetRequest):
 async def admin_reset_password(request: AdminPasswordResetConfirm):
     """Reset password using token from email - Auto-creates admin if not exists"""
     
-    valid_tokens = reset_token_collection.find({
+    valid_tokens = admin_reset_token_collection.find({
         "expires_at": {"$gt": datetime.utcnow()},
         "used": False
     })
@@ -94,7 +94,7 @@ async def admin_reset_password(request: AdminPasswordResetConfirm):
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     
     # Mark token as used
-    reset_token_collection.update_one(
+    admin_reset_token_collection.update_one(
         {"_id": token_doc["_id"]},
         {"$set": {"used": True}}
     )

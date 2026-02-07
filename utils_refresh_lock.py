@@ -4,12 +4,13 @@
 # ============================================================
 # ✅ Atomic lock acquisition (MongoDB unique index enforced)
 # ✅ Lock ownership validation (prevents accidental release)
-# ✅ TTL failsafe (auto-cleanup after 5 minutes)
+# ✅ TTL failsafe (auto-cleanup after 15 minutes)
 # ✅ Thread-safe and crash-safe
 # ✅ Reusable for Instagram, TikTok, and future platforms
+# ✅ UTC time everywhere
 # ============================================================
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pymongo.errors import DuplicateKeyError
 from pymongo.collection import Collection
 import uuid
@@ -25,8 +26,9 @@ class RefreshLock:
     Features:
     - Atomic: Uses MongoDB unique index to prevent race conditions
     - Safe: Validates lock ownership before release
-    - Self-healing: TTL auto-cleanup after 5 minutes
+    - Self-healing: TTL auto-cleanup after 15 minutes
     - Observable: Logs all operations
+    - UTC-based: All timestamps in UTC
     
     Usage:
         lock = RefreshLock(collection, username)
@@ -44,6 +46,8 @@ class RefreshLock:
                 # Do refresh work
                 pass
     """
+    
+    LOCK_TTL_MINUTES = 15  # Auto-expire locks after 15 minutes
     
     def __init__(self, collection: Collection, username: str, platform: str = ""):
         """
@@ -71,16 +75,23 @@ class RefreshLock:
         Race-safe: Only one process can insert per username
         """
         try:
+            now = datetime.utcnow()
+            expires_at = now + timedelta(minutes=self.LOCK_TTL_MINUTES)
+            
             # Atomic insert - MongoDB rejects duplicates
             self.collection.insert_one({
                 "username": self.username,
-                "locked_at": datetime.now(),
+                "locked_at": now,
+                "expires_at": expires_at,
                 "lock_id": self.lock_id,  # For ownership validation
                 "locked_by": f"process_{id(self)}"  # For debugging
             })
             
             self.lock_acquired = True
-            logger.info(f"🔓 {self.platform} refresh lock acquired for @{self.username} (lock_id: {self.lock_id[:8]}...)")
+            logger.info(
+                f"🔓 {self.platform} refresh lock acquired for @{self.username} "
+                f"(lock_id: {self.lock_id[:8]}..., expires: {expires_at.isoformat()})"
+            )
             return True
             
         except DuplicateKeyError:
@@ -89,9 +100,14 @@ class RefreshLock:
             
             if existing_lock:
                 locked_at = existing_lock.get("locked_at")
+                expires_at = existing_lock.get("expires_at")
+                
                 if locked_at:
-                    age = (datetime.now() - locked_at).seconds
-                    logger.info(f"🔒 {self.platform} refresh already in progress for @{self.username} (locked {age}s ago)")
+                    age_seconds = (datetime.utcnow() - locked_at).total_seconds()
+                    logger.info(
+                        f"🔒 {self.platform} refresh already in progress for @{self.username} "
+                        f"(locked {age_seconds:.1f}s ago, expires: {expires_at.isoformat() if expires_at else 'unknown'})"
+                    )
             
             return False
             
@@ -159,12 +175,14 @@ class RefreshLock:
             return None
         
         locked_at = lock_doc.get("locked_at")
-        age_seconds = (datetime.now() - locked_at).seconds if locked_at else None
+        expires_at = lock_doc.get("expires_at")
+        age_seconds = (datetime.utcnow() - locked_at).total_seconds() if locked_at else None
         
         return {
             "username": self.username,
             "locked_at": locked_at.isoformat() if locked_at else None,
-            "age_seconds": age_seconds,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+            "age_seconds": round(age_seconds, 2) if age_seconds is not None else None,
             "lock_id": lock_doc.get("lock_id"),
             "locked_by": lock_doc.get("locked_by"),
             "owned_by_me": lock_doc.get("lock_id") == self.lock_id
@@ -226,13 +244,48 @@ def get_all_active_locks(collection: Collection) -> list:
         # Add age info
         for lock in locks:
             locked_at = lock.get("locked_at")
+            expires_at = lock.get("expires_at")
+            
             if locked_at:
-                age_seconds = (datetime.now() - locked_at).seconds
-                lock["age_seconds"] = age_seconds
+                age_seconds = (datetime.utcnow() - locked_at).total_seconds()
+                lock["age_seconds"] = round(age_seconds, 2)
                 lock["locked_at"] = locked_at.isoformat()
+            
+            if expires_at:
+                lock["expires_at"] = expires_at.isoformat()
         
         return locks
         
     except Exception as e:
         logger.error(f"❌ Error getting active locks: {e}")
         return []
+
+
+def cleanup_expired_locks(collection: Collection) -> int:
+    """
+    Manually clean up expired locks.
+    
+    This should normally be handled by MongoDB TTL index,
+    but this function can be used for manual cleanup or testing.
+    
+    Args:
+        collection: Lock collection
+    
+    Returns:
+        Number of locks cleaned up
+    """
+    try:
+        now = datetime.utcnow()
+        
+        result = collection.delete_many({
+            "expires_at": {"$lt": now}
+        })
+        
+        if result.deleted_count > 0:
+            logger.info(f"🧹 Cleaned up {result.deleted_count} expired locks")
+        
+        return result.deleted_count
+        
+    except Exception as e:
+        logger.error(f"❌ Error cleaning up expired locks: {e}")
+        return 0

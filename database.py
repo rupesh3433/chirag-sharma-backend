@@ -3,11 +3,12 @@
 # PRODUCTION-GRADE DATABASE CONFIGURATION - FINAL VERSION
 # ============================================================
 # ✅ Atomic refresh locks (unique index enforced)
-# ✅ Proper TTL strategy (locks + reset tokens ONLY)
+# ✅ Proper TTL strategy (locks + reset tokens + metrics)
 # ✅ Consistent naming conventions
 # ✅ Performance indexes
 # ✅ Retry queue auto-cleanup
 # ✅ Connection pooling and error handling
+# ✅ Metrics TTL (30 days auto-cleanup)
 # ============================================================
 
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -63,15 +64,12 @@ except Exception as e:
 # - Metrics: {platform}_metrics
 # ============================================================
 
-
 #DONOT REMOVE THESE 5
 booking_collection = db["bookings"]
 admin_collection = db["admins"]
-reset_token_collection = db["reset_tokens"]
+admin_reset_token_collection = db["admin_reset_tokens"]
 knowledge_collection = db["knowledge_base"]
 event_collection = db["events"]
-
-
 
 # ------------------------------------------------------------
 # INSTAGRAM COLLECTIONS
@@ -114,7 +112,7 @@ def create_indexes():
         # Donot Remove these My main these 5 collection's indexes
         #--------------------------------
         # Reset tokens - auto-expire
-        reset_token_collection.create_index("expires_at", expireAfterSeconds=0)
+        admin_reset_token_collection.create_index("expires_at", expireAfterSeconds=0)
         
         # Admins - unique email
         admin_collection.create_index("email", unique=True)
@@ -164,9 +162,9 @@ def create_indexes():
         
         # Instagram Refresh Locks - TTL cleanup (failsafe)
         instagram_refresh_lock_collection.create_index(
-            [("locked_at", ASCENDING)],
-            expireAfterSeconds=300,  # 5 minutes TTL
-            name="ttl_5min"
+            [("expires_at", ASCENDING)],
+            expireAfterSeconds=0,
+            name="ttl_expires_at"
         )
         
         # Instagram Retry Queue - status and next_retry_at
@@ -203,6 +201,13 @@ def create_indexes():
             name="timestamp_desc"
         )
         
+        # Instagram Metrics - TTL for auto-cleanup (30 days)
+        instagram_metrics_collection.create_index(
+            [("timestamp", ASCENDING)],
+            expireAfterSeconds=2592000,  # 30 days TTL
+            name="ttl_30days"
+        )
+        
         logger.info("✅ Instagram indexes created")
         
         # ------------------------------------------------------------
@@ -231,9 +236,9 @@ def create_indexes():
         
         # TikTok Refresh Locks - TTL cleanup (failsafe)
         tiktok_refresh_lock_collection.create_index(
-            [("locked_at", ASCENDING)],
-            expireAfterSeconds=300,  # 5 minutes TTL
-            name="ttl_5min"
+            [("expires_at", ASCENDING)],
+            expireAfterSeconds=0,
+            name="ttl_expires_at"
         )
         
         # TikTok Retry Queue - status and next_retry_at
@@ -268,6 +273,13 @@ def create_indexes():
         tiktok_metrics_collection.create_index(
             [("timestamp", DESCENDING)],
             name="timestamp_desc"
+        )
+        
+        # TikTok Metrics - TTL for auto-cleanup (30 days)
+        tiktok_metrics_collection.create_index(
+            [("timestamp", ASCENDING)],
+            expireAfterSeconds=2592000,  # 30 days TTL
+            name="ttl_30days"
         )
         
         logger.info("✅ TikTok indexes created")
@@ -405,7 +417,7 @@ def cleanup_old_data(days: int = 30):
     """
     try:
         from datetime import datetime, timedelta
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
         
         logger.info(f"🧹 Cleaning up data older than {days} days...")
         
@@ -481,15 +493,15 @@ logger.info("📊 DATABASE MODULE LOADED - PRODUCTION READY")
 logger.info("=" * 60)
 logger.info("Instagram Collections:")
 logger.info("  - instagram_cache (NO TTL - logical expiry only)")
-logger.info("  - instagram_refresh_locks (TTL: 5 min, UNIQUE)")
+logger.info("  - instagram_refresh_locks (TTL: expires_at, UNIQUE)")
 logger.info("  - instagram_retry_queue (TTL: 7 days for failed)")
-logger.info("  - instagram_metrics (manual cleanup)")
+logger.info("  - instagram_metrics (TTL: 30 days auto-cleanup)")
 logger.info("")
 logger.info("TikTok Collections:")
 logger.info("  - tiktok_cache (NO TTL - logical expiry only)")
-logger.info("  - tiktok_refresh_locks (TTL: 5 min, UNIQUE)")
+logger.info("  - tiktok_refresh_locks (TTL: expires_at, UNIQUE)")
 logger.info("  - tiktok_retry_queue (TTL: 7 days for failed)")
-logger.info("  - tiktok_metrics (manual cleanup)")
+logger.info("  - tiktok_metrics (TTL: 30 days auto-cleanup)")
 logger.info("")
 logger.info("User Management:")
 logger.info("  - users (user accounts)")
@@ -497,5 +509,7 @@ logger.info("  - reset_tokens (TTL: 1 hour)")
 logger.info("")
 logger.info("🔒 CRITICAL INDEXES:")
 logger.info("  - Refresh locks: UNIQUE on username (atomic acquire)")
+logger.info("  - Refresh locks: TTL on expires_at (auto-cleanup)")
 logger.info("  - Retry queue: TTL on failed_at (auto-cleanup)")
+logger.info("  - Metrics: TTL on timestamp (30 days auto-cleanup)")
 logger.info("=" * 60)

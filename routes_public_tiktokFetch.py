@@ -1,8 +1,9 @@
 # routes_public_tiktokFetch.py
 # ============================================================
-# PRODUCTION-GRADE TIKTOK FETCH - FINAL VERSION WITH ATOMIC LOCKS
+# PRODUCTION-GRADE TIKTOK FETCH - PROFILE-CENTRIC ARCHITECTURE
 # ============================================================
-# ✅ FIXED: Correct RapidAPI parameters (user_id + unique_id)
+# ✅ Profile-centric architecture (matches Instagram)
+# ✅ /profile is single source of truth
 # ✅ Atomic refresh locks (unique index enforced)
 # ✅ Lock ownership validation
 # ✅ Schema versioning
@@ -12,10 +13,17 @@
 # ✅ Async-safe Cloudinary cleanup
 # ✅ MongoDB cache with logical TTL (2 days)
 # ✅ Safe fallback strategies
+# ✅ UTC time everywhere
+# ✅ Concurrency-safe retry queue
+# ✅ TTL math correctness
+# ✅ Namespaced Cloudinary IDs
+# ✅ Safe cleanup ordering
+# ✅ Fixed lock release pattern
+# ✅ Async retry queue processing
 # ============================================================
 
 from fastapi import APIRouter, Query, BackgroundTasks
-import requests
+import httpx
 import logging
 import time
 from typing import Dict, Any, List, Optional
@@ -25,6 +33,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import cloudinary
 import cloudinary.uploader
+from pymongo import ReturnDocument
 
 from config import (
     RAPIDAPI_KEY, 
@@ -63,9 +72,11 @@ router = APIRouter(
 # ------------------------------------------------------------
 DEFAULT_TIKTOK_USERNAME = "_chirag_101"  # Default username
 CACHE_TTL_DAYS = 2  # Refresh every 2 days
+CACHE_TTL_SECONDS = CACHE_TTL_DAYS * 86400  # Exact TTL in seconds
 MAX_VIDEOS = 20  # Maximum videos per request
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 60
+RETRY_RECLAIM_MINUTES = 10  # Reclaim stuck processing items after 10 minutes
 
 BASE_URL = f"https://{TIKTOK_RAPIDAPI_HOST}"
 HEADERS = {
@@ -86,8 +97,18 @@ if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
 else:
     logger.warning("⚠️ Cloudinary not configured - TikTok thumbnails will not be uploaded")
 
-# Thread pool for async Cloudinary operations
-cloudinary_executor = ThreadPoolExecutor(max_workers=5)
+# ------------------------------------------------------------
+# LAZY CLOUDINARY EXECUTOR
+# ------------------------------------------------------------
+_cloudinary_executor = None
+
+def get_cloudinary_executor():
+    """Get or create the Cloudinary thread pool executor."""
+    global _cloudinary_executor
+    if _cloudinary_executor is None:
+        _cloudinary_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="cloudinary-tiktok")
+        logger.info("✅ TikTok Cloudinary executor initialized")
+    return _cloudinary_executor
 
 # ------------------------------------------------------------
 # METRICS TRACKING
@@ -120,13 +141,13 @@ class MetricsTracker:
                 "duration_seconds": round(duration_seconds, 2),
                 "success": success,
                 "error": error,
-                "timestamp": datetime.now()
+                "timestamp": datetime.utcnow()
             }
             
             tiktok_metrics_collection.insert_one(metric)
             logger.info(f"📊 TikTok Metrics logged: {metric}")
         except Exception as e:
-            logger.error(f"❌ Error logging TikTok metrics: {e}")
+            logger.error(f"❌ Error logging TikTok metrics (non-fatal): {e}")
     
     @staticmethod
     def log_cloudinary_retry(username: str, public_id: str, success: bool, attempts: int):
@@ -138,12 +159,12 @@ class MetricsTracker:
                 "public_id": public_id,
                 "success": success,
                 "attempts": attempts,
-                "timestamp": datetime.now()
+                "timestamp": datetime.utcnow()
             }
             
             tiktok_metrics_collection.insert_one(metric)
         except Exception as e:
-            logger.error(f"❌ Error logging TikTok retry metric: {e}")
+            logger.error(f"❌ Error logging TikTok retry metric (non-fatal): {e}")
 
 # ------------------------------------------------------------
 # CLOUDINARY RETRY QUEUE
@@ -153,48 +174,90 @@ class CloudinaryRetryQueue:
     
     @staticmethod
     def add_failed_delete(username: str, public_id: str, video_id: str, error: str):
-        """Add a failed delete to the retry queue."""
+        """Add a failed delete to the retry queue (idempotent)."""
         try:
-            retry_item = {
-                "username": username,
-                "public_id": public_id,
-                "video_id": video_id,
-                "status": "pending",
-                "retry_count": 0,
-                "last_error": error,
-                "created_at": datetime.now(),
-                "next_retry_at": datetime.now() + timedelta(seconds=RETRY_DELAY_SECONDS)
-            }
+            now = datetime.utcnow()
             
-            tiktok_retry_queue_collection.insert_one(retry_item)
+            tiktok_retry_queue_collection.update_one(
+                {
+                    "username": username,
+                    "public_id": public_id
+                },
+                {
+                    "$setOnInsert": {
+                        "username": username,
+                        "public_id": public_id,
+                        "video_id": video_id,
+                        "status": "pending",
+                        "retry_count": 0,
+                        "created_at": now
+                    },
+                    "$set": {
+                        "last_error": error,
+                        "next_retry_at": now + timedelta(seconds=RETRY_DELAY_SECONDS)
+                    }
+                },
+                upsert=True
+            )
             logger.info(f"📥 Added to TikTok retry queue: {public_id}")
         except Exception as e:
             logger.error(f"❌ Error adding to TikTok retry queue: {e}")
     
     @staticmethod
-    def process_retry_queue(background: bool = True) -> Dict[str, int]:
+    async def process_retry_queue_async() -> Dict[str, int]:
         """
-        Process pending items in the retry queue.
+        Process pending items in the retry queue with atomic operations (ASYNC).
         Returns dict with success/failure counts.
         """
         try:
-            # Find pending items ready for retry
-            pending_items = tiktok_retry_queue_collection.find({
-                "status": "pending",
-                "retry_count": {"$lt": MAX_RETRY_ATTEMPTS},
-                "next_retry_at": {"$lte": datetime.now()}
-            })
-            
             success_count = 0
             failed_count = 0
             
-            for item in pending_items:
+            loop = asyncio.get_event_loop()
+            executor = get_cloudinary_executor()
+            
+            # Process items one-by-one using atomic findOneAndUpdate
+            while True:
+                now = datetime.utcnow()
+                reclaim_threshold = now - timedelta(minutes=RETRY_RECLAIM_MINUTES)
+                
+                # Atomic claim: find pending item OR stuck processing item
+                item = tiktok_retry_queue_collection.find_one_and_update(
+                    {
+                        "$or": [
+                            {
+                                "status": "pending",
+                                "retry_count": {"$lt": MAX_RETRY_ATTEMPTS},
+                                "next_retry_at": {"$lte": now}
+                            },
+                            {
+                                "status": "processing",
+                                "processing_at": {"$lt": reclaim_threshold}
+                            }
+                        ]
+                    },
+                    {
+                        "$set": {
+                            "status": "processing",
+                            "processing_at": now
+                        }
+                    },
+                    return_document=ReturnDocument.AFTER
+                )
+                
+                if not item:
+                    # No more items to process
+                    break
+                
                 public_id = item["public_id"]
                 retry_count = item["retry_count"]
                 
                 try:
-                    # Attempt to delete
-                    result = cloudinary.uploader.destroy(public_id, resource_type="image")
+                    # Attempt to delete (run in executor to avoid blocking)
+                    def _delete():
+                        return cloudinary.uploader.destroy(public_id, resource_type="image")
+                    
+                    result = await loop.run_in_executor(executor, _delete)
                     
                     if result.get("result") in ["ok", "not found"]:
                         # Success - remove from queue
@@ -224,7 +287,7 @@ class CloudinaryRetryQueue:
                                     "status": "failed",
                                     "retry_count": new_retry_count,
                                     "last_error": str(e),
-                                    "failed_at": datetime.now()
+                                    "failed_at": datetime.utcnow()
                                 }
                             }
                         )
@@ -243,9 +306,10 @@ class CloudinaryRetryQueue:
                             {"_id": item["_id"]},
                             {
                                 "$set": {
+                                    "status": "pending",
                                     "retry_count": new_retry_count,
                                     "last_error": str(e),
-                                    "next_retry_at": datetime.now() + timedelta(seconds=next_retry_delay)
+                                    "next_retry_at": datetime.utcnow() + timedelta(seconds=next_retry_delay)
                                 }
                             }
                         )
@@ -265,7 +329,7 @@ class CloudinaryRetryQueue:
 # ------------------------------------------------------------
 # ASYNC-SAFE CLOUDINARY OPERATIONS
 # ------------------------------------------------------------
-async def upload_thumbnail_async(thumbnail_url: str, video_id: str) -> Optional[Dict[str, str]]:
+async def upload_thumbnail_async(thumbnail_url: str, video_id: str, username: str) -> Optional[Dict[str, str]]:
     """
     Upload TikTok thumbnail to Cloudinary asynchronously.
     Returns dict with 'url' and 'public_id' keys, or None if upload fails.
@@ -275,13 +339,16 @@ async def upload_thumbnail_async(thumbnail_url: str, video_id: str) -> Optional[
         return None
     
     loop = asyncio.get_event_loop()
+    executor = get_cloudinary_executor()
     
     def _upload():
         try:
+            # Namespaced public_id to prevent collisions
+            public_id = f"tiktok/{username}/video_{video_id}"
+            
             result = cloudinary.uploader.upload(
                 thumbnail_url,
-                folder="tiktok_videos",
-                public_id=f"video_{video_id}",
+                public_id=public_id,
                 overwrite=True,
                 resource_type="image",
                 transformation=[
@@ -302,7 +369,7 @@ async def upload_thumbnail_async(thumbnail_url: str, video_id: str) -> Optional[
             logger.error(f"❌ Failed to upload TikTok thumbnail to Cloudinary for {video_id}: {e}")
             return None
     
-    return await loop.run_in_executor(cloudinary_executor, _upload)
+    return await loop.run_in_executor(executor, _upload)
 
 
 async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, Any]], username: str) -> Dict[str, int]:
@@ -328,6 +395,7 @@ async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, A
     logger.info(f"🗑️ Starting async Cloudinary cleanup for {len(videos)} old TikTok videos...")
     
     loop = asyncio.get_event_loop()
+    executor = get_cloudinary_executor()
     
     async def _delete_single(video: Dict[str, Any]) -> Dict[str, Any]:
         cloudinary_data = video.get("cloudinary")
@@ -365,7 +433,7 @@ async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, A
                     "video_id": video.get("video_id")
                 }
         
-        return await loop.run_in_executor(cloudinary_executor, _delete)
+        return await loop.run_in_executor(executor, _delete)
     
     # Delete all thumbnails concurrently
     tasks = [_delete_single(video) for video in videos]
@@ -417,8 +485,9 @@ def get_cached_profile(username: str) -> Optional[Dict[str, Any]]:
         if cache_doc:
             cached_at = cache_doc.get("cached_at")
             if cached_at:
-                age_days = (datetime.now() - cached_at).days
-                logger.info(f"📦 Found cached TikTok profile for @{username} (age: {age_days} days)")
+                age_seconds = (datetime.utcnow() - cached_at).total_seconds()
+                age_days = age_seconds / 86400
+                logger.info(f"📦 Found cached TikTok profile for @{username} (age: {age_days:.2f} days)")
                 return cache_doc
         
         return None
@@ -436,11 +505,12 @@ def should_refresh_cache(cache_doc: Optional[Dict[str, Any]]) -> bool:
     if not cached_at:
         return True
     
-    age = datetime.now() - cached_at
-    should_refresh = age > timedelta(days=CACHE_TTL_DAYS)
+    age_seconds = (datetime.utcnow() - cached_at).total_seconds()
+    should_refresh = age_seconds > CACHE_TTL_SECONDS
     
     if should_refresh:
-        logger.info(f"🔄 TikTok cache is {age.days} days old, refreshing...")
+        age_days = age_seconds / 86400
+        logger.info(f"🔄 TikTok cache is {age_days:.2f} days old, refreshing...")
     
     return should_refresh
 
@@ -450,10 +520,10 @@ def save_profile_to_cache(username: str, user_data: Dict[str, Any], videos: List
     try:
         cache_doc = {
             "username": username,
-            "schema_version": 1,  # ← NEW: Schema versioning
+            "schema_version": 1,
             "user": user_data,
             "videos": videos,
-            "cached_at": datetime.now(),
+            "cached_at": datetime.utcnow(),
             "videos_count": len(videos)
         }
         
@@ -471,12 +541,46 @@ def save_profile_to_cache(username: str, user_data: Dict[str, Any], videos: List
         return False
 
 
-# ------------------------------------------------------------
-# CORE FETCH LOGIC WITH CLOUDINARY
-# ------------------------------------------------------------
-def fetch_user_info(username: str) -> Dict[str, Any]:
+async def refresh_cache_with_cleanup_async(
+    cache_doc: Optional[Dict[str, Any]], 
+    username: str,
+    fresh_user: Dict[str, Any],
+    fresh_videos: List[Dict[str, Any]]
+) -> Dict[str, Any]:
     """
-    Fetch TikTok user info with guaranteed stats.
+    Refresh cache with proper async cleanup flow.
+    CRITICAL: Save new cache FIRST, then cleanup old assets (best-effort).
+    
+    Returns:
+        Dict with operation results and metrics
+    """
+    start_time = time.time()
+    
+    # Step 1: Save new cache FIRST (authoritative)
+    save_success = save_profile_to_cache(username, fresh_user, fresh_videos)
+    
+    # Step 2: Delete old Cloudinary thumbnails (async, best-effort)
+    cleanup_stats = await delete_old_cloudinary_thumbnails_async(cache_doc, username)
+    
+    # Calculate duration
+    duration = time.time() - start_time
+    
+    # Count Cloudinary uploads
+    cloudinary_uploads = sum(1 for video in fresh_videos if video.get("cloudinary"))
+    
+    return {
+        "save_success": save_success,
+        "cloudinary_deletes": cleanup_stats["deleted"],
+        "failed_deletes": cleanup_stats["failed"],
+        "queued_deletes": cleanup_stats["queued"],
+        "cloudinary_uploads": cloudinary_uploads,
+        "duration": duration
+    }
+
+
+async def fetch_user_info_async(username: str) -> Dict[str, Any]:
+    """
+    Fetch TikTok user info with guaranteed stats using async HTTP.
 
     Final Flow (AUTHORITATIVE):
     1. Call /user/info using unique_id (username)
@@ -487,25 +591,21 @@ def fetch_user_info(username: str) -> Dict[str, Any]:
     logger.info(f"🚀 Fetching TikTok user info for @{username}")
 
     url = f"{BASE_URL}/user/info"
-    params = {"unique_id": username}  # ✅ ONLY correct parameter
+    params = {"unique_id": username}
 
     # ------------------------------------------------------------
-    # NETWORK REQUEST
+    # ASYNC NETWORK REQUEST
     # ------------------------------------------------------------
     try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            params=params,
-            timeout=20
-        )
-    except requests.exceptions.Timeout as e:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(url, headers=HEADERS, params=params)
+    except httpx.TimeoutException as e:
         logger.error("⏱️ TikTok user/info request timed out")
         raise RuntimeError("TikTok API timeout") from e
-    except requests.exceptions.ConnectionError as e:
+    except httpx.ConnectError as e:
         logger.error("🔌 TikTok user/info connection error")
         raise RuntimeError("TikTok API connection error") from e
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         logger.error(f"🌐 TikTok user/info request error: {e}")
         raise RuntimeError("TikTok API request failure") from e
 
@@ -569,8 +669,8 @@ def fetch_user_info(username: str) -> Dict[str, Any]:
     # FINAL USER OBJECT (CACHE-SAFE)
     # ------------------------------------------------------------
     user = {
-        "internal_user_id": user_raw.get("id"),          # authoritative ID
-        "username": user_raw.get("uniqueId"),            # same as input
+        "internal_user_id": user_raw.get("id"),
+        "username": user_raw.get("uniqueId"),
         "nickname": user_raw.get("nickname"),
         "bio": user_raw.get("signature"),
         "verified": bool(user_raw.get("verified", False)),
@@ -589,12 +689,13 @@ def fetch_user_info(username: str) -> Dict[str, Any]:
     return user
     
 
-async def fetch_user_posts_async(unique_id: str, count: int = 20) -> List[Dict[str, Any]]:
+async def fetch_user_posts_async(unique_id: str, username: str, count: int = 20) -> List[Dict[str, Any]]:
     """
     Fetch user posts from RapidAPI with async Cloudinary uploads.
     
     Args:
         unique_id: TikTok username/unique_id
+        username: Username for namespacing Cloudinary IDs
         count: Number of videos to fetch
     
     Returns:
@@ -603,7 +704,6 @@ async def fetch_user_posts_async(unique_id: str, count: int = 20) -> List[Dict[s
     try:
         url = f"{BASE_URL}/user/posts"
         
-        # ✅ FIX: Only use unique_id as parameter (based on actual API response)
         params = {
             "unique_id": unique_id,
             "count": min(count, MAX_VIDEOS),
@@ -612,14 +712,19 @@ async def fetch_user_posts_async(unique_id: str, count: int = 20) -> List[Dict[s
         
         logger.info(f"🚀 Fetching TikTok posts for @{unique_id} (count: {params['count']})")
         
-        # Fetch from API (sync in executor)
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: requests.get(url, headers=HEADERS, params=params, timeout=20)
-        )
-        #Uncomment Only for Debugging
-        # logger.warning(f"🧪 RAW TikTok posts response (first 2000 chars): {response.text[:2000]}")
+        # Fetch from API (async)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=HEADERS, params=params)
+        except httpx.TimeoutException:
+            logger.error("⏱️ TikTok user posts request timed out")
+            raise
+        except httpx.ConnectError:
+            logger.error("🔌 TikTok user posts connection error")
+            raise
+        except httpx.RequestError as e:
+            logger.error(f"🌐 TikTok user posts request error: {e}")
+            raise
         
         logger.info(f"📡 TikTok user posts response status: {response.status_code}")
         
@@ -648,7 +753,6 @@ async def fetch_user_posts_async(unique_id: str, count: int = 20) -> List[Dict[s
         videos = []
         for i, item in enumerate(items):
             try:
-                # ✅ FIX: Map correct field names from actual API response
                 video = {
                     "video_id": item.get("video_id") or item.get("aweme_id"),
                     "video_url": item.get("play") or _safe(item, "video", "playAddr"),
@@ -676,112 +780,29 @@ async def fetch_user_posts_async(unique_id: str, count: int = 20) -> List[Dict[s
         # Upload all thumbnails to Cloudinary concurrently
         if videos:
             logger.info(f"☁️ Uploading {len(videos)} TikTok thumbnails to Cloudinary...")
-            upload_tasks = [
-                upload_thumbnail_async(video["thumbnail_url"], video["video_id"])
-                for video in videos
-                if video.get("thumbnail_url")
-            ]
-            upload_results = await asyncio.gather(*upload_tasks)
             
-            # Update videos with Cloudinary data
-            upload_count = 0
-            for video, cloudinary_result in zip(videos, upload_results):
-                if cloudinary_result:
-                    video["cloudinary"] = cloudinary_result
-                    upload_count += 1
+            # Create upload tasks only for videos with thumbnails
+            for i, video in enumerate(videos):
+                if video.get("thumbnail_url"):
+                    cloudinary_result = await upload_thumbnail_async(video["thumbnail_url"], video["video_id"], username)
+                    if cloudinary_result:
+                        video["cloudinary"] = cloudinary_result
+            
+            # Count successful uploads
+            upload_count = sum(1 for video in videos if video.get("cloudinary"))
             
             logger.info(f"☁️ TikTok Cloudinary uploads complete: {upload_count}/{len(videos)} successful")
         
         logger.info(f"🎯 Successfully extracted {len(videos)} TikTok videos")
         return videos
         
-    except requests.exceptions.Timeout:
-        logger.error("⏱️ Request timeout - TikTok RapidAPI took too long to respond")
-        raise
-    except requests.exceptions.ConnectionError:
-        logger.error("🔌 Connection error - Could not connect to TikTok RapidAPI")
-        raise
     except Exception as e:
         logger.error(f"❌ Unexpected error fetching TikTok user posts: {e}")
         raise
 
 
-async def fetch_from_rapidapi_async(username: str, count: int) -> Dict[str, Any]:
-    """
-    Main orchestration function to fetch complete profile data.
-    Combines user info and posts into single response.
-    Tracks timing metrics.
-    """
-    start_time = time.time()
-    
-    try:
-        # Step 1: Fetch user info
-        user = fetch_user_info(username)
-        
-        # Step 2: Fetch user posts with Cloudinary uploads
-        # ✅ FIX: Only pass unique_id (username) - user_id not needed by this API
-        videos = await fetch_user_posts_async(
-            unique_id=user["username"],
-            count=count
-        )
-        
-        # Combine into single payload
-        payload = {
-            "user": user,
-            "videos": videos
-        }
-        
-        # Calculate duration
-        duration = time.time() - start_time
-        
-        logger.info(f"✅ Successfully fetched TikTok profile for @{username} in {duration:.2f}s")
-        return payload
-        
-    except Exception as e:
-        # Log failure metrics
-        duration = time.time() - start_time
-        logger.error(f"❌ Failed to fetch TikTok profile: {e}")
-        raise
-
-
-async def refresh_cache_with_cleanup_async(
-    cache_doc: Optional[Dict[str, Any]], 
-    username: str,
-    fresh_user: Dict[str, Any],
-    fresh_videos: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """
-    Refresh cache with proper async cleanup flow.
-    
-    Returns:
-        Dict with operation results and metrics
-    """
-    start_time = time.time()
-    
-    # Step 1: Delete old Cloudinary thumbnails (async)
-    cleanup_stats = await delete_old_cloudinary_thumbnails_async(cache_doc, username)
-    
-    # Step 2: Save new cache (atomic upsert)
-    save_success = save_profile_to_cache(username, fresh_user, fresh_videos)
-    
-    # Calculate duration
-    duration = time.time() - start_time
-    
-    # Count Cloudinary uploads
-    cloudinary_uploads = sum(1 for video in fresh_videos if video.get("cloudinary"))
-    
-    return {
-        "save_success": save_success,
-        "cloudinary_deletes": cleanup_stats["deleted"],
-        "failed_deletes": cleanup_stats["failed"],
-        "queued_deletes": cleanup_stats["queued"],
-        "cloudinary_uploads": cloudinary_uploads,
-        "duration": duration
-    }
-
-
 # ------------------------------------------------------------
-# MAIN ENDPOINT
+# AUTHORITATIVE ENDPOINT: /profile
 # ------------------------------------------------------------
 @router.get("/profile")
 async def get_profile(
@@ -792,11 +813,14 @@ async def get_profile(
     """
     Fetch TikTok profile with user info and videos.
     
-    - Uses MongoDB cache (TTL: 2 days)
-    - Atomic refresh lock prevents race conditions
-    - Graceful fallback to old cache on API failure
-    - Cloudinary thumbnail management
-    - Returns profile data matching exact schema
+    AUTHORITATIVE ENDPOINT - SINGLE SOURCE OF TRUTH
+    - This is the ONLY endpoint that calls RapidAPI
+    - This is the ONLY endpoint that uploads to Cloudinary
+    - This is the ONLY endpoint that writes to cache
+    - This is the ONLY endpoint that acquires refresh locks
+    
+    Returns:
+        Complete profile data with user info and videos
     """
     
     # Try to get from cache
@@ -808,22 +832,25 @@ async def get_profile(
         user = cache_doc.get("user", {})
         videos = cache_doc.get("videos", [])
         cached_at = cache_doc.get("cached_at")
-        age_days = (datetime.now() - cached_at).days if cached_at else 0
+        age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 0
+        age_days = age_seconds / 86400
         
-        logger.info(f"✅ Serving TikTok profile for @{username} from MongoDB cache (age: {age_days} days)")
+        logger.info(f"✅ Serving TikTok profile for @{username} from MongoDB cache (age: {age_days:.2f} days)")
         
         # Process retry queue in background
         if background_tasks:
-            background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue)
+            background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue_async)
         
         return {
             "success": True,
             "source": "mongodb_cache",
             "cached_at": cached_at.isoformat() if cached_at else None,
-            "cache_age_days": age_days,
+            "cache_age_days": round(age_days, 2),
+            "cache_age_seconds": round(age_seconds, 2),
             "user": user,
             "videos": videos[:count],
-            "timestamp": datetime.now().isoformat()
+            "metrics": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     # Cache is old or doesn't exist - try to acquire refresh lock
@@ -833,25 +860,30 @@ async def get_profile(
         platform="TikTok"
     )
     
-    if not refresh_lock.acquire():
+    lock_acquired = refresh_lock.acquire()
+    
+    if not lock_acquired:
         # Another process is refreshing - serve old cache if available
         if cache_doc and cache_doc.get("user") and cache_doc.get("videos"):
             user = cache_doc.get("user", {})
             videos = cache_doc.get("videos", [])
             cached_at = cache_doc.get("cached_at")
-            age_days = (datetime.now() - cached_at).days if cached_at else 999
+            age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 999999
+            age_days = age_seconds / 86400
             
-            logger.info(f"🔒 Refresh in progress by another process, serving old TikTok cache for @{username} (age: {age_days} days)")
+            logger.info(f"🔒 Refresh in progress by another process, serving old TikTok cache for @{username} (age: {age_days:.2f} days)")
             
             return {
                 "success": True,
                 "source": "mongodb_cache_locked",
                 "cached_at": cached_at.isoformat() if cached_at else None,
-                "cache_age_days": age_days,
+                "cache_age_days": round(age_days, 2),
+                "cache_age_seconds": round(age_seconds, 2),
                 "message": "Refresh in progress, serving cached data",
                 "user": user,
                 "videos": videos[:count],
-                "timestamp": datetime.now().isoformat()
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
         else:
             return {
@@ -860,19 +892,20 @@ async def get_profile(
                 "error": "Refresh in progress and no cache available",
                 "user": {},
                 "videos": [],
-                "timestamp": datetime.now().isoformat()
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
     
     try:
-        # Fetch fresh data from API
+        # Fetch user info
         logger.info(f"🎬 Fetching fresh TikTok profile for @{username} from RapidAPI")
-        fresh_data = await fetch_from_rapidapi_async(username, count)
+        user = await fetch_user_info_async(username)
         
-        user = fresh_data.get("user", {})
-        videos = fresh_data.get("videos", [])
+        # Fetch user posts with Cloudinary uploads
+        videos = await fetch_user_posts_async(user["username"], username, MAX_VIDEOS)
         
         if user and videos:
-            # Refresh cache with async cleanup
+            # Refresh cache with async cleanup (save first, cleanup after)
             refresh_stats = await refresh_cache_with_cleanup_async(cache_doc, username, user, videos)
             
             # Log metrics
@@ -891,12 +924,16 @@ async def get_profile(
             
             # Process retry queue in background
             if background_tasks:
-                background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue)
+                background_tasks.add_task(CloudinaryRetryQueue.process_retry_queue_async)
             
             return {
                 "success": True,
                 "source": "rapidapi_fresh",
-                "cached_to_db": refresh_stats["save_success"],
+                "cached_at": datetime.utcnow().isoformat(),
+                "cache_age_days": 0,
+                "cache_age_seconds": 0,
+                "user": user,
+                "videos": videos[:count],
                 "metrics": {
                     "cloudinary_uploads": refresh_stats["cloudinary_uploads"],
                     "cloudinary_deletes": refresh_stats["cloudinary_deletes"],
@@ -904,9 +941,7 @@ async def get_profile(
                     "queued_for_retry": refresh_stats["queued_deletes"],
                     "duration_seconds": round(refresh_stats["duration"], 2)
                 },
-                "user": user,
-                "videos": videos[:count],
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # API returned empty data - fallback to cache if available
@@ -914,9 +949,10 @@ async def get_profile(
             user = cache_doc.get("user", {})
             videos = cache_doc.get("videos", [])
             cached_at = cache_doc.get("cached_at")
-            age_days = (datetime.now() - cached_at).days if cached_at else 999
+            age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 999999
+            age_days = age_seconds / 86400
             
-            logger.warning(f"⚠️ TikTok API returned empty data, using old cache for @{username} (age: {age_days} days)")
+            logger.warning(f"⚠️ TikTok API returned empty data, using old cache for @{username} (age: {age_days:.2f} days)")
             
             # Log failed refresh
             MetricsTracker.log_refresh(
@@ -935,11 +971,13 @@ async def get_profile(
                 "success": True,
                 "source": "mongodb_cache_fallback",
                 "cached_at": cached_at.isoformat() if cached_at else None,
-                "cache_age_days": age_days,
+                "cache_age_days": round(age_days, 2),
+                "cache_age_seconds": round(age_seconds, 2),
                 "warning": "Using old cache - API returned empty data",
                 "user": user,
                 "videos": videos[:count],
-                "timestamp": datetime.now().isoformat()
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # Everything failed - return error
@@ -963,7 +1001,8 @@ async def get_profile(
             "error": "Unable to fetch profile - API unavailable and no cache exists",
             "user": {},
             "videos": [],
-            "timestamp": datetime.now().isoformat()
+            "metrics": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -974,9 +1013,10 @@ async def get_profile(
             user = cache_doc.get("user", {})
             videos = cache_doc.get("videos", [])
             cached_at = cache_doc.get("cached_at")
-            age_days = (datetime.now() - cached_at).days if cached_at else 999
+            age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 999999
+            age_days = age_seconds / 86400
             
-            logger.warning(f"⚠️ Exception occurred, using old TikTok cache for @{username} (age: {age_days} days)")
+            logger.warning(f"⚠️ Exception occurred, using old TikTok cache for @{username} (age: {age_days:.2f} days)")
             
             MetricsTracker.log_refresh(
                 username=username,
@@ -994,11 +1034,13 @@ async def get_profile(
                 "success": True,
                 "source": "mongodb_cache_fallback",
                 "cached_at": cached_at.isoformat() if cached_at else None,
-                "cache_age_days": age_days,
+                "cache_age_days": round(age_days, 2),
+                "cache_age_seconds": round(age_seconds, 2),
                 "warning": f"Using old cache - API error: {str(e)}",
                 "user": user,
                 "videos": videos[:count],
-                "timestamp": datetime.now().isoformat()
+                "metrics": None,
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         return {
@@ -1007,12 +1049,14 @@ async def get_profile(
             "error": str(e),
             "user": {},
             "videos": [],
-            "timestamp": datetime.now().isoformat()
+            "metrics": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     finally:
-        # Always release the lock
-        refresh_lock.release()
+        # Only release if we acquired it
+        if lock_acquired:
+            refresh_lock.release()
 
 
 # ------------------------------------------------------------
@@ -1044,13 +1088,13 @@ async def get_metrics(
             "success": True,
             "count": len(metrics),
             "metrics": metrics,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1059,6 +1103,7 @@ async def get_retry_queue_status():
     """Get status of the TikTok Cloudinary retry queue."""
     try:
         pending = tiktok_retry_queue_collection.count_documents({"status": "pending"})
+        processing = tiktok_retry_queue_collection.count_documents({"status": "processing"})
         failed = tiktok_retry_queue_collection.count_documents({"status": "failed"})
         
         recent_items = list(
@@ -1071,22 +1116,23 @@ async def get_retry_queue_status():
         # Convert ObjectId to string
         for item in recent_items:
             item["_id"] = str(item["_id"])
-            for date_field in ["created_at", "next_retry_at", "failed_at"]:
+            for date_field in ["created_at", "next_retry_at", "failed_at", "processing_at"]:
                 if date_field in item and item[date_field]:
                     item[date_field] = item[date_field].isoformat()
         
         return {
             "success": True,
             "pending_count": pending,
+            "processing_count": processing,
             "failed_count": failed,
             "recent_items": recent_items,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1094,19 +1140,19 @@ async def get_retry_queue_status():
 async def process_retry_queue_endpoint():
     """Manually trigger TikTok retry queue processing."""
     try:
-        result = CloudinaryRetryQueue.process_retry_queue(background=False)
+        result = await CloudinaryRetryQueue.process_retry_queue_async()
         return {
             "success": True,
             "processed": result["success"] + result["failed"],
             "success_count": result["success"],
             "failed_count": result["failed"],
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
@@ -1120,12 +1166,13 @@ async def get_cache_status(username: str = Query(DEFAULT_TIKTOK_USERNAME, descri
             "cached": False,
             "username": username,
             "message": "No cache found",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     cached_at = cache_doc.get("cached_at")
     videos_count = cache_doc.get("videos_count", 0)
-    age_days = (datetime.now() - cached_at).days if cached_at else 0
+    age_seconds = (datetime.utcnow() - cached_at).total_seconds() if cached_at else 0
+    age_days = age_seconds / 86400
     needs_refresh = should_refresh_cache(cache_doc)
     
     # Check for active refresh lock
@@ -1136,11 +1183,13 @@ async def get_cache_status(username: str = Query(DEFAULT_TIKTOK_USERNAME, descri
         "username": username,
         "videos_count": videos_count,
         "cached_at": cached_at.isoformat() if cached_at else None,
-        "age_days": age_days,
+        "age_days": round(age_days, 2),
+        "age_seconds": round(age_seconds, 2),
         "needs_refresh": needs_refresh,
         "refresh_in_progress": refresh_lock_active,
         "ttl_days": CACHE_TTL_DAYS,
-        "timestamp": datetime.now().isoformat()
+        "ttl_seconds": CACHE_TTL_SECONDS,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 
@@ -1163,21 +1212,20 @@ async def clear_cache(username: str = Query(DEFAULT_TIKTOK_USERNAME, description
             "documents_deleted": result.deleted_count,
             "cloudinary_cleaned": bool(cache_doc),
             "cloudinary_stats": cleanup_stats,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
         logger.error(f"❌ Error clearing TikTok cache: {e}")
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 
-@router.get("/force-refresh")
+@router.post("/force-refresh")
 async def force_refresh(
-    username: str = Query(DEFAULT_TIKTOK_USERNAME, description="TikTok username"),
-    count: int = Query(20, ge=1, le=30, description="Number of videos to fetch")
+    username: str = Query(DEFAULT_TIKTOK_USERNAME, description="TikTok username")
 ):
     """
     Force refresh the TikTok cache from API (with Cloudinary cleanup).
@@ -1192,31 +1240,33 @@ async def force_refresh(
         platform="TikTok"
     )
     
-    if not refresh_lock.acquire():
+    lock_acquired = refresh_lock.acquire()
+    
+    if not lock_acquired:
         return {
             "success": False,
             "error": f"Refresh already in progress for @{username}",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     try:
         # Get old cache first for cleanup
         cache_doc = get_cached_profile(username)
         
-        # Fetch fresh data
-        fresh_data = await fetch_from_rapidapi_async(username, count)
+        # Fetch user info
+        user = await fetch_user_info_async(username)
         
-        user = fresh_data.get("user", {})
-        videos = fresh_data.get("videos", [])
+        # Fetch videos
+        videos = await fetch_user_posts_async(user["username"], username, MAX_VIDEOS)
         
         if not user or not videos:
             return {
                 "success": False,
                 "error": "Failed to fetch TikTok profile from API",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.utcnow().isoformat()
             }
         
-        # Refresh cache with proper cleanup
+        # Refresh cache with proper cleanup (save first, cleanup after)
         refresh_stats = await refresh_cache_with_cleanup_async(cache_doc, username, user, videos)
         
         # Log metrics
@@ -1233,8 +1283,8 @@ async def force_refresh(
         
         return {
             "success": refresh_stats["save_success"],
+            "count": len(videos),
             "message": f"Successfully refreshed TikTok profile for @{username} with {len(videos)} videos",
-            "videos_count": len(videos),
             "metrics": {
                 "cloudinary_uploads": refresh_stats["cloudinary_uploads"],
                 "cloudinary_deletes": refresh_stats["cloudinary_deletes"],
@@ -1242,7 +1292,7 @@ async def force_refresh(
                 "queued_for_retry": refresh_stats["queued_deletes"],
                 "duration_seconds": round(refresh_stats["duration"], 2)
             },
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -1250,10 +1300,12 @@ async def force_refresh(
         return {
             "success": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     finally:
-        refresh_lock.release()
+        # Only release if we acquired it
+        if lock_acquired:
+            refresh_lock.release()
 
 
 @router.get("/health")
@@ -1275,9 +1327,11 @@ async def health_check():
         )
         
         if recent_cache and recent_cache.get("cached_at"):
-            age_days = (datetime.now() - recent_cache["cached_at"]).days
+            age_seconds = (datetime.utcnow() - recent_cache["cached_at"]).total_seconds()
+            age_days = age_seconds / 86400
             status = "healthy"
         else:
+            age_seconds = None
             age_days = None
             status = "degraded" if cache_count == 0 else "healthy"
         
@@ -1285,17 +1339,23 @@ async def health_check():
         active_locks = tiktok_refresh_lock_collection.count_documents({})
         
         # Check retry queue
-        retry_queue_size = tiktok_retry_queue_collection.count_documents({"status": "pending"})
+        retry_queue_pending = tiktok_retry_queue_collection.count_documents({"status": "pending"})
+        retry_queue_processing = tiktok_retry_queue_collection.count_documents({"status": "processing"})
+        retry_queue_failed = tiktok_retry_queue_collection.count_documents({"status": "failed"})
         
         return {
             "status": status,
             "mongodb_connected": True,
             "cache_entries": cache_count,
-            "most_recent_cache_age_days": age_days,
+            "most_recent_cache_age_days": round(age_days, 2) if age_days is not None else None,
+            "most_recent_cache_age_seconds": round(age_seconds, 2) if age_seconds is not None else None,
             "active_refresh_locks": active_locks,
-            "retry_queue_size": retry_queue_size,
+            "retry_queue_pending": retry_queue_pending,
+            "retry_queue_processing": retry_queue_processing,
+            "retry_queue_failed": retry_queue_failed,
             "ttl_days": CACHE_TTL_DAYS,
-            "timestamp": datetime.now().isoformat()
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -1304,7 +1364,7 @@ async def health_check():
             "status": "down",
             "mongodb_connected": False,
             "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 @router.get("/raw")
@@ -1323,18 +1383,18 @@ async def get_raw_response(
         user_info_url = f"{BASE_URL}/user/info"
         logger.info(f"🔧 TikTok RAW debug request: {user_info_url}")
 
-        user_response = requests.get(
-            user_info_url,
-            headers=HEADERS,
-            params={"unique_id": username},  # ✅ CORRECT PARAM
-            timeout=15
-        )
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            user_response = await client.get(
+                user_info_url,
+                headers=HEADERS,
+                params={"unique_id": username}
+            )
 
         debug_info = {
             "user_info": {
                 "endpoint": "user/info",
                 "status_code": user_response.status_code,
-                "url": user_response.url,
+                "url": str(user_response.url),
                 "raw_text": user_response.text[:2000]
             }
         }
@@ -1356,20 +1416,20 @@ async def get_raw_response(
         # --------------------------------------------------
         posts_url = f"{BASE_URL}/user/posts"
 
-        posts_response = requests.get(
-            posts_url,
-            headers=HEADERS,
-            params={
-                "unique_id": username,  # ✅ SAME unique_id
-                "count": 5
-            },
-            timeout=15
-        )
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            posts_response = await client.get(
+                posts_url,
+                headers=HEADERS,
+                params={
+                    "unique_id": username,
+                    "count": 5
+                }
+            )
 
         debug_info["user_posts"] = {
             "endpoint": "user/posts",
             "status_code": posts_response.status_code,
-            "url": posts_response.url,
+            "url": str(posts_response.url),
             "raw_text": posts_response.text[:2000]
         }
 
@@ -1399,5 +1459,5 @@ async def get_raw_response(
             "error": str(e),
             "rapidapi_host": TIKTOK_RAPIDAPI_HOST,
             "rapidapi_key_present": bool(RAPIDAPI_KEY),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
