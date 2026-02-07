@@ -476,60 +476,118 @@ def save_profile_to_cache(username: str, user_data: Dict[str, Any], videos: List
 # ------------------------------------------------------------
 def fetch_user_info(username: str) -> Dict[str, Any]:
     """
-    Fetch user info from RapidAPI.
-    Returns user data dict with all required fields.
-    """
-    try:
-        url = f"{BASE_URL}/user/info"
-        params = {"username": username}
-        
-        logger.info(f"🚀 Fetching TikTok user info for @{username}")
-        
-        response = requests.get(url, headers=HEADERS, params=params, timeout=20)
-        
-        logger.info(f"📡 TikTok user info response status: {response.status_code}")
-        
-        if response.status_code != 200:
-            logger.error(f"❌ TikTok user info API request failed: {response.status_code}")
-            logger.error(f"📝 Response text: {response.text[:500]}")
-            raise Exception(f"API returned status {response.status_code}")
-        
-        try:
-            payload = response.json()
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Failed to parse TikTok user info JSON response: {e}")
-            raise
-        
-        # Extract user data from response
-        data = payload.get("data", {})
-        user_raw = data.get("user", {})
-        stats = data.get("stats", {})
-        
-        user = {
-            "internal_user_id": _safe(user_raw, "id"),
-            "username": _safe(user_raw, "uniqueId") or username,
-            "nickname": _safe(user_raw, "nickname"),
-            "bio": _safe(user_raw, "signature"),
-            "verified": bool(_safe(user_raw, "verified", default=False)),
-            "followers_count": _safe(stats, "followerCount", default=0),
-            "following_count": _safe(stats, "followingCount", default=0),
-            "total_likes_count": _safe(stats, "heartCount", default=0),
-            "profile_picture_url": _safe(user_raw, "avatarLarger")
-        }
-        
-        logger.info(f"✅ Successfully fetched TikTok user info for @{user['username']}")
-        return user
-        
-    except requests.exceptions.Timeout:
-        logger.error("⏱️ Request timeout - TikTok RapidAPI took too long to respond")
-        raise
-    except requests.exceptions.ConnectionError:
-        logger.error("🔌 Connection error - Could not connect to TikTok RapidAPI")
-        raise
-    except Exception as e:
-        logger.error(f"❌ Unexpected error fetching TikTok user info: {e}")
-        raise
+    Fetch TikTok user info with guaranteed stats.
 
+    Final Flow (AUTHORITATIVE):
+    1. Call /user/info using unique_id (username)
+    2. Extract user_id from response
+    3. Strictly validate stats
+    """
+
+    logger.info(f"🚀 Fetching TikTok user info for @{username}")
+
+    url = f"{BASE_URL}/user/info"
+    params = {"unique_id": username}  # ✅ ONLY correct parameter
+
+    # ------------------------------------------------------------
+    # NETWORK REQUEST
+    # ------------------------------------------------------------
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params=params,
+            timeout=20
+        )
+    except requests.exceptions.Timeout as e:
+        logger.error("⏱️ TikTok user/info request timed out")
+        raise RuntimeError("TikTok API timeout") from e
+    except requests.exceptions.ConnectionError as e:
+        logger.error("🔌 TikTok user/info connection error")
+        raise RuntimeError("TikTok API connection error") from e
+    except requests.exceptions.RequestException as e:
+        logger.error(f"🌐 TikTok user/info request error: {e}")
+        raise RuntimeError("TikTok API request failure") from e
+
+    logger.info(
+        f"📡 TikTok user info response | "
+        f"status={response.status_code} url={response.url}"
+    )
+
+    if response.status_code != 200:
+        logger.error(
+            f"❌ TikTok user/info HTTP failure | "
+            f"status={response.status_code} body={response.text[:300]}"
+        )
+        raise RuntimeError(f"TikTok API returned HTTP {response.status_code}")
+
+    # ------------------------------------------------------------
+    # JSON PARSING
+    # ------------------------------------------------------------
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as e:
+        logger.error(
+            f"❌ Invalid JSON from TikTok user/info | "
+            f"body={response.text[:300]}"
+        )
+        raise RuntimeError("Invalid JSON from TikTok API") from e
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        logger.error(f"❌ Missing data object in TikTok response: {payload}")
+        raise RuntimeError("Malformed TikTok response (data missing)")
+
+    user_raw = data.get("user")
+    stats = data.get("stats")
+
+    if not isinstance(user_raw, dict):
+        logger.error(f"❌ Missing user object in TikTok response: {payload}")
+        raise RuntimeError("Malformed TikTok response (user missing)")
+
+    if not isinstance(stats, dict):
+        logger.error(f"❌ Missing stats object in TikTok response: {payload}")
+        raise RuntimeError("Malformed TikTok response (stats missing)")
+
+    # ------------------------------------------------------------
+    # STRICT STAT VALIDATION
+    # ------------------------------------------------------------
+    try:
+        followers = int(stats["followerCount"])
+        following = int(stats["followingCount"])
+        likes = int(stats["heartCount"])
+    except (KeyError, TypeError, ValueError) as e:
+        logger.error(
+            f"❌ Invalid TikTok stats | "
+            f"followers={stats.get('followerCount')} "
+            f"following={stats.get('followingCount')} "
+            f"likes={stats.get('heartCount')}"
+        )
+        raise RuntimeError("TikTok stats invalid or missing") from e
+
+    # ------------------------------------------------------------
+    # FINAL USER OBJECT (CACHE-SAFE)
+    # ------------------------------------------------------------
+    user = {
+        "internal_user_id": user_raw.get("id"),          # authoritative ID
+        "username": user_raw.get("uniqueId"),            # same as input
+        "nickname": user_raw.get("nickname"),
+        "bio": user_raw.get("signature"),
+        "verified": bool(user_raw.get("verified", False)),
+        "followers_count": followers,
+        "following_count": following,
+        "total_likes_count": likes,
+        "profile_picture_url": user_raw.get("avatarLarger"),
+    }
+
+    logger.info(
+        "✅ TikTok user info resolved successfully | "
+        f"@{user['username']} "
+        f"followers={followers} following={following} likes={likes}"
+    )
+
+    return user
+    
 
 async def fetch_user_posts_async(unique_id: str, count: int = 20) -> List[Dict[str, Any]]:
     """
@@ -1116,7 +1174,7 @@ async def clear_cache(username: str = Query(DEFAULT_TIKTOK_USERNAME, description
         }
 
 
-@router.post("/force-refresh")
+@router.get("/force-refresh")
 async def force_refresh(
     username: str = Query(DEFAULT_TIKTOK_USERNAME, description="TikTok username"),
     count: int = Query(20, ge=1, le=30, description="Number of videos to fetch")
@@ -1249,90 +1307,97 @@ async def health_check():
             "timestamp": datetime.now().isoformat()
         }
 
-
 @router.get("/raw")
-async def get_raw_response(username: str = Query(DEFAULT_TIKTOK_USERNAME, description="TikTok username")):
+async def get_raw_response(
+    username: str = Query(DEFAULT_TIKTOK_USERNAME, description="TikTok username / unique_id")
+):
     """
-    Get raw API response for debugging purposes.
-    Shows actual response structure from RapidAPI.
-    This is Only for Testing.. This is Not Used in this File.
+    Get RAW API responses for debugging.
+    This endpoint shows EXACT responses from RapidAPI.
+    It is NOT used in production flow.
     """
     try:
-        # Step 1: Get user info first
+        # --------------------------------------------------
+        # STEP 1: RAW user/info (MUST use unique_id)
+        # --------------------------------------------------
         user_info_url = f"{BASE_URL}/user/info"
-        logger.info(f"🔧 TikTok debug request to: {user_info_url}")
-        
+        logger.info(f"🔧 TikTok RAW debug request: {user_info_url}")
+
         user_response = requests.get(
             user_info_url,
             headers=HEADERS,
-            params={"username": username},
+            params={"unique_id": username},  # ✅ CORRECT PARAM
             timeout=15
         )
-        
+
         debug_info = {
             "user_info": {
                 "endpoint": "user/info",
                 "status_code": user_response.status_code,
                 "url": user_response.url,
+                "raw_text": user_response.text[:2000]
             }
         }
-        
-        if user_response.status_code == 200:
-            try:
-                user_data = user_response.json()
-                user_id = user_data.get("data", {}).get("user", {}).get("id")
-                unique_id = user_data.get("data", {}).get("user", {}).get("uniqueId")
-                
-                debug_info["user_info"]["user_id"] = user_id
-                debug_info["user_info"]["unique_id"] = unique_id
-                debug_info["user_info"]["response_sample"] = str(user_data)[:500]
-                
-                # Step 2: Test posts endpoint with unique_id only
-                posts_url = f"{BASE_URL}/user/posts"
-                posts_response = requests.get(
-                    posts_url,
-                    headers=HEADERS,
-                    params={
-                        "unique_id": username,  # ✅ Only unique_id needed
-                        "count": 5
-                    },
-                    timeout=15
+
+        # Try parsing user info JSON
+        try:
+            user_json = user_response.json()
+            debug_info["user_info"]["json"] = user_json
+
+            user_obj = user_json.get("data", {}).get("user", {})
+            debug_info["user_info"]["user_id"] = user_obj.get("id")
+            debug_info["user_info"]["unique_id"] = user_obj.get("uniqueId")
+
+        except Exception as e:
+            debug_info["user_info"]["json_error"] = str(e)
+
+        # --------------------------------------------------
+        # STEP 2: RAW user/posts (unique_id only)
+        # --------------------------------------------------
+        posts_url = f"{BASE_URL}/user/posts"
+
+        posts_response = requests.get(
+            posts_url,
+            headers=HEADERS,
+            params={
+                "unique_id": username,  # ✅ SAME unique_id
+                "count": 5
+            },
+            timeout=15
+        )
+
+        debug_info["user_posts"] = {
+            "endpoint": "user/posts",
+            "status_code": posts_response.status_code,
+            "url": posts_response.url,
+            "raw_text": posts_response.text[:2000]
+        }
+
+        # Try parsing posts JSON
+        try:
+            posts_json = posts_response.json()
+            debug_info["user_posts"]["json"] = posts_json
+
+            videos = posts_json.get("data", {}).get("videos", [])
+            debug_info["user_posts"]["videos_found"] = len(videos)
+
+            if videos:
+                debug_info["user_posts"]["sample_video_id"] = (
+                    videos[0].get("video_id") or videos[0].get("aweme_id")
                 )
-                
-                debug_info["user_posts"] = {
-                    "endpoint": "user/posts",
-                    "status_code": posts_response.status_code,
-                    "url": posts_response.url,
-                    "response_preview": posts_response.text[:2000]
-                }
-                
-                if posts_response.status_code == 200:
-                    try:
-                        posts_data = posts_response.json()
-                        videos = posts_data.get("data", {}).get("videos", [])
-                        videos_count = len(videos)
-                        debug_info["user_posts"]["videos_found"] = videos_count
-                        
-                        # Show structure of first video
-                        if videos:
-                            first_video = videos[0]
-                            debug_info["user_posts"]["sample_video_fields"] = list(first_video.keys())
-                            debug_info["user_posts"]["sample_video_id"] = first_video.get("video_id") or first_video.get("aweme_id")
-                    except:
-                        pass
-                
-            except json.JSONDecodeError:
-                debug_info["user_info"]["json_response"] = False
-                debug_info["user_info"]["response_preview"] = user_response.text[:1000]
-        else:
-            debug_info["user_info"]["response_preview"] = user_response.text[:1000]
-        
+                debug_info["user_posts"]["sample_video_fields"] = list(videos[0].keys())
+
+        except Exception as e:
+            debug_info["user_posts"]["json_error"] = str(e)
+
         return debug_info
-        
+
     except Exception as e:
+        logger.exception("❌ RAW TikTok debug endpoint failed")
         return {
+            "success": False,
             "error": str(e),
-            "rapidapi_url": BASE_URL if TIKTOK_RAPIDAPI_HOST else "Not set",
+            "rapidapi_host": TIKTOK_RAPIDAPI_HOST,
             "rapidapi_key_present": bool(RAPIDAPI_KEY),
             "timestamp": datetime.now().isoformat()
         }
