@@ -31,7 +31,7 @@ def format_event(event_dict):
 # ----------------------
 # Public Event Endpoints
 # ----------------------
-@router.get("/", response_model=dict)
+@router.get("", response_model=dict)
 async def get_public_events(
     status: Optional[str] = None,
     is_active: Optional[bool] = True,  # Default to active events only
