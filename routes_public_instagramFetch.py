@@ -457,6 +457,51 @@ async def delete_old_cloudinary_thumbnails_async(cache_doc: Optional[Dict[str, A
         "queued": queued_count
     }
 
+
+async def upload_profile_picture_async(profile_url: str, username: str) -> Optional[Dict[str, str]]:
+    """
+    Upload Instagram profile picture to Cloudinary.
+    Safe, idempotent, overwrite-enabled.
+    """
+
+    if not profile_url:
+        return None
+
+    if not all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET]):
+        logger.warning("⚠️ Cloudinary not configured, skipping profile avatar upload")
+        return None
+
+    loop = asyncio.get_event_loop()
+    executor = get_cloudinary_executor()
+
+    def _upload():
+        try:
+            public_id = f"instagram/{username}/profile_avatar"
+
+            result = cloudinary.uploader.upload(
+                profile_url,
+                public_id=public_id,
+                overwrite=True,
+                resource_type="image",
+                transformation=[
+                    {"width": 300, "height": 300, "crop": "fill", "quality": "auto:good"}
+                ]
+            )
+
+            logger.info(f"✅ Instagram profile avatar uploaded: {public_id}")
+
+            return {
+                "url": result.get("secure_url"),
+                "public_id": result.get("public_id")
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to upload Instagram profile avatar: {e}")
+            return None
+
+    return await loop.run_in_executor(executor, _upload)
+
+
 # ------------------------------------------------------------
 # HELPER FUNCTIONS
 # ------------------------------------------------------------
@@ -821,7 +866,10 @@ async def refresh_cache_with_cleanup_async(
     }
 
 
-async def fetch_instagram_user_info_async(username: str) -> Dict[str, Any]:
+async def fetch_instagram_user_info_async(
+    username: str,
+    cached_user: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     Fetch Instagram user profile info (bio, followers, following, posts) using async HTTP.
 
@@ -910,6 +958,41 @@ async def fetch_instagram_user_info_async(username: str) -> Dict[str, Any]:
         or ""
     )
 
+
+    raw_profile_pic = (
+        data.get("profile_pic_url_hd")
+        or data.get("profile_pic_url")
+    )
+
+    cached_cloudinary = None
+    cached_source_url = None
+
+    if cached_user:
+        cached_cloudinary = cached_user.get("profile_picture_cloudinary")
+        cached_source_url = (
+            cached_cloudinary.get("source_url")
+            if isinstance(cached_cloudinary, dict)
+            else None
+        )
+
+    cloudinary_avatar = cached_cloudinary
+
+    # 🔥 Upload ONLY if profile picture changed
+    if raw_profile_pic and (
+        not cached_cloudinary or cached_source_url != raw_profile_pic
+    ):
+        logger.info("🔄 Instagram profile picture changed — uploading new avatar")
+
+        new_avatar = await upload_profile_picture_async(raw_profile_pic, username)
+
+        # ✅ Only replace cached avatar if upload succeeded
+        if isinstance(new_avatar, dict):
+            cloudinary_avatar = new_avatar
+        else:
+            logger.warning(
+                "⚠️ Avatar upload failed — keeping existing cached avatar"
+            )
+
     # ------------------------------------------------------------
     # FINAL USER OBJECT (CACHE-SAFE)
     # ------------------------------------------------------------
@@ -921,11 +1004,26 @@ async def fetch_instagram_user_info_async(username: str) -> Dict[str, Any]:
         "following_count": following,
         "posts_count": posts,
         "is_verified": bool(data.get("is_verified", False)),
+
+        # Always Cloudinary URL
         "profile_picture_url": (
-            data.get("profile_pic_url_hd")
-            or data.get("profile_pic_url")
+            cloudinary_avatar.get("url")
+            if isinstance(cloudinary_avatar, dict)
+            else None
+        ),
+
+        # Store Cloudinary + source URL safely
+        "profile_picture_cloudinary": (
+            {
+                "url": cloudinary_avatar.get("url"),
+                "public_id": cloudinary_avatar.get("public_id"),
+                "source_url": raw_profile_pic
+            }
+            if isinstance(cloudinary_avatar, dict)
+            else None
         )
     }
+
 
     logger.info(
         "✅ Instagram user info resolved | "
@@ -1033,7 +1131,10 @@ async def get_profile(
     try:
         # Fetch user info
         logger.info(f"🎬 Fetching fresh Instagram profile for @{username} from RapidAPI")
-        user = await fetch_instagram_user_info_async(username)
+        cached_user = cache_doc.get("user") if cache_doc else None
+        user = await fetch_instagram_user_info_async(username, cached_user)
+
+
         
         # Fetch reels with async Cloudinary uploads
         fresh_reels = await fetch_reels_from_rapidapi_async(username, MAX_REELS)
@@ -1449,7 +1550,9 @@ async def force_refresh(
         cache_doc = get_cached_reels(username)
         
         # Fetch user info
-        user = await fetch_instagram_user_info_async(username)
+        cached_user = cache_doc.get("user") if cache_doc else None
+        user = await fetch_instagram_user_info_async(username, cached_user)
+
         
         # Fetch fresh reels
         fresh_reels = await fetch_reels_from_rapidapi_async(username, MAX_REELS)
