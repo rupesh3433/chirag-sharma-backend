@@ -75,7 +75,6 @@ LANGUAGE_MAP = {
 # ----------------------
 CORS_ORIGINS = [
     "https://sharmachirag.vercel.app",
-    "https://sharmachiragadmin.vercel.app",
     "http://localhost:5173",
     "http://localhost:5174",
 ]
