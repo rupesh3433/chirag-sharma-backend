@@ -97,3 +97,11 @@ ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/jpg", "image/webp"]
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 INSTAGRAM_RAPIDAPI_HOST = os.getenv("INSTAGRAM_RAPIDAPI_HOST")
 TIKTOK_RAPIDAPI_HOST =  os.getenv("TIKTOK_RAPIDAPI_HOST")
+
+
+# =========================
+# RAZORPAY
+# =========================
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")

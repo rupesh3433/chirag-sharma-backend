@@ -70,6 +70,7 @@ admin_collection = db["admins"]
 admin_reset_token_collection = db["admin_reset_tokens"]
 knowledge_collection = db["knowledge_base"]
 event_collection = db["events"]
+payments_collection = db["payments"]
 
 # ------------------------------------------------------------
 # INSTAGRAM COLLECTIONS
@@ -135,7 +136,25 @@ def create_indexes():
         event_collection.create_index("date_to")
         event_collection.create_index([("status", 1), ("is_active", 1)])
         event_collection.create_index([("date_from", 1), ("date_to", 1)])
-        
+
+
+        # ------------------------------------------------------------
+        # PAYMENTS INDEXES
+        # ------------------------------------------------------------
+        payments_collection.create_index("booking_id")
+        payments_collection.create_index("provider")
+        payments_collection.create_index("order_id")
+        payments_collection.create_index(
+            [("payment_id", ASCENDING)],
+            unique=True,
+            partialFilterExpression={
+                "payment_id": {"$exists": True}
+            },
+            name="payment_id_unique_not_null"
+        )
+        payments_collection.create_index("status")
+        payments_collection.create_index("created_at")
+                
         # ------------------------------------------------------------
         # INSTAGRAM INDEXES
         # ------------------------------------------------------------
@@ -350,7 +369,8 @@ def check_database_health() -> dict:
             "tiktok_retry_queue": tiktok_retry_queue_collection.count_documents({}),
             "tiktok_metrics": tiktok_metrics_collection.count_documents({}),
             "users": users_collection.count_documents({}),
-            "reset_tokens": reset_tokens_collection.count_documents({})
+            "reset_tokens": reset_tokens_collection.count_documents({}),
+            "payments": payments_collection.count_documents({})
         }
         
         return {
