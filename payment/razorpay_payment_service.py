@@ -294,6 +294,7 @@ class RazorpayPaymentService:
 
         return {
             "success": True,
+            "provider": "razorpay",
             "order_id": razorpay_order["id"],
             "amount": amount,
             "currency": currency,

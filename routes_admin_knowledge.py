@@ -6,7 +6,7 @@ from models import KnowledgeCreate, KnowledgeUpdate
 from security import get_current_admin
 from database import knowledge_collection
 from config import LANGUAGE_MAP
-from utils import serialize_knowledge
+from utils.serializers import serialize_knowledge
 
 router = APIRouter(prefix="/admin/knowledge", tags=["Admin Knowledge Base"])
 

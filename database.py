@@ -9,6 +9,9 @@
 # ✅ Retry queue auto-cleanup
 # ✅ Connection pooling and error handling
 # ✅ Metrics TTL (30 days auto-cleanup)
+# ✅ Multi-provider payment indexes (Razorpay + Khalti)
+# ✅ Unique partial index on pidx (Khalti)
+# ✅ Compound index: (booking_id, provider)
 # ============================================================
 
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -36,7 +39,7 @@ try:
         retryWrites=True,  # Retry writes on network errors
         w='majority'  # Write concern: majority of nodes
     )
-    
+
     try:
         client.admin.command("ping")
         logger.info("✅ MongoDB connection successful")
@@ -46,7 +49,7 @@ try:
     # Get database
     db = client[MONGODB_DB_NAME]
     logger.info(f"✅ Using database: {MONGODB_DB_NAME}")
-    
+
 except (ConnectionFailure, ServerSelectionTimeoutError) as e:
     logger.error(f"❌ MongoDB connection failed: {e}")
     raise
@@ -64,7 +67,7 @@ except Exception as e:
 # - Metrics: {platform}_metrics
 # ============================================================
 
-#DONOT REMOVE THESE 5
+# DONOT REMOVE THESE 5
 booking_collection = db["bookings"]
 admin_collection = db["admins"]
 admin_reset_token_collection = db["admin_reset_tokens"]
@@ -109,25 +112,27 @@ def create_indexes():
     try:
         logger.info("🔧 Creating MongoDB indexes...")
 
-        #--------------------------------
+        # --------------------------------
         # Donot Remove these My main these 5 collection's indexes
-        #--------------------------------
+        # --------------------------------
         # Reset tokens - auto-expire
         admin_reset_token_collection.create_index("expires_at", expireAfterSeconds=0)
-        
+
         # Admins - unique email
         admin_collection.create_index("email", unique=True)
-        
+
         # Bookings - common queries
         booking_collection.create_index("created_at")
         booking_collection.create_index("status")
-        
+        booking_collection.create_index("payment_status")
+        booking_collection.create_index("payment_provider")
+
         # Knowledge base - common queries
         knowledge_collection.create_index("language")
         knowledge_collection.create_index("is_active")
         knowledge_collection.create_index("created_at")
         knowledge_collection.create_index([("language", 1), ("is_active", 1)])
-        
+
         # Events - common queries
         event_collection.create_index("created_at")
         event_collection.create_index("status")
@@ -137,206 +142,263 @@ def create_indexes():
         event_collection.create_index([("status", 1), ("is_active", 1)])
         event_collection.create_index([("date_from", 1), ("date_to", 1)])
 
+        # ------------------------------------------------------------
+        # PAYMENTS INDEXES — MULTI-PROVIDER (Razorpay + Khalti)
+        # ------------------------------------------------------------
 
-        # ------------------------------------------------------------
-        # PAYMENTS INDEXES
-        # ------------------------------------------------------------
-        payments_collection.create_index("booking_id")
-        payments_collection.create_index("provider")
-        payments_collection.create_index("order_id")
+        # booking_id lookup
+        payments_collection.create_index(
+            [("booking_id", ASCENDING)],
+            name="booking_id_idx"
+        )
+
+        # provider index (razorpay | khalti)
+        payments_collection.create_index(
+            [("provider", ASCENDING)],
+            name="provider_idx"
+        )
+
+        # order_id lookup (Razorpay order ID / Khalti purchase_order_id)
+        payments_collection.create_index(
+            [("order_id", ASCENDING)],
+            name="order_id_idx"
+        )
+
+        # status index
+        payments_collection.create_index(
+            [("status", ASCENDING)],
+            name="status_idx"
+        )
+
+        # created_at for sorting and analytics
+        payments_collection.create_index(
+            [("created_at", DESCENDING)],
+            name="created_at_desc"
+        )
+
+        # COMPOUND: booking_id + provider
+        # Prevents duplicate active payments per provider for same booking
+        payments_collection.create_index(
+            [("booking_id", ASCENDING), ("provider", ASCENDING)],
+            name="booking_provider_compound"
+        )
+
+        # COMPOUND: booking_id + status (fast lookup for replacement strategy)
+        payments_collection.create_index(
+            [("booking_id", ASCENDING), ("status", ASCENDING)],
+            name="booking_status_compound"
+        )
+
+        # UNIQUE PARTIAL: payment_id (Razorpay payment_id / Khalti transaction_id)
+        # Only enforced when payment_id is not null
         payments_collection.create_index(
             [("payment_id", ASCENDING)],
             unique=True,
             partialFilterExpression={
-                "payment_id": {"$exists": True}
+                "payment_id": {"$type": "string"}
             },
             name="payment_id_unique_not_null"
         )
-        payments_collection.create_index("status")
-        payments_collection.create_index("created_at")
-                
+
+        # UNIQUE PARTIAL: pidx (Khalti payment identifier)
+        # Only enforced when pidx is not null — prevents duplicate Khalti sessions
+        payments_collection.create_index(
+            [("pidx", ASCENDING)],
+            unique=True,
+            sparse=True,
+            name="khalti_pidx_unique_sparse"
+        )
+
+        # fraud_flag index for monitoring / alerting
+        payments_collection.create_index(
+            [("fraud_flag", ASCENDING)],
+            name="fraud_flag_idx"
+        )
+
+        logger.info("✅ Payments collection indexes created (multi-provider: Razorpay + Khalti)")
+
         # ------------------------------------------------------------
         # INSTAGRAM INDEXES
         # ------------------------------------------------------------
-        
+
         # Instagram Cache - username lookup (unique)
         instagram_reels_collection.create_index(
             [("username", ASCENDING)],
             unique=True,
             name="username_unique"
         )
-        
+
         # Instagram Cache - cached_at for sorting
         instagram_reels_collection.create_index(
             [("cached_at", DESCENDING)],
             name="cached_at_desc"
         )
-        
+
         # Instagram Refresh Locks - username lookup (UNIQUE - CRITICAL FOR ATOMICITY)
         instagram_refresh_lock_collection.create_index(
             [("username", ASCENDING)],
             unique=True,  # ← CRITICAL: Enforces atomic lock acquisition
             name="username_unique_lock"
         )
-        
+
         # Instagram Refresh Locks - TTL cleanup (failsafe)
         instagram_refresh_lock_collection.create_index(
             [("expires_at", ASCENDING)],
             expireAfterSeconds=0,
             name="ttl_expires_at"
         )
-        
+
         # Instagram Retry Queue - status and next_retry_at
         instagram_retry_queue_collection.create_index(
             [("status", ASCENDING), ("next_retry_at", ASCENDING)],
             name="status_next_retry"
         )
-        
+
         instagram_retry_queue_collection.create_index(
             [("username", ASCENDING)],
             name="username_lookup"
         )
-        
+
         instagram_retry_queue_collection.create_index(
             [("created_at", DESCENDING)],
             name="created_at_desc"
         )
-        
+
         # Instagram Retry Queue - TTL for old failed items (auto-cleanup)
         instagram_retry_queue_collection.create_index(
             [("failed_at", ASCENDING)],
             expireAfterSeconds=604800,  # 7 days TTL for failed items
             name="ttl_7days_failed"
         )
-        
+
         # Instagram Metrics - username and timestamp
         instagram_metrics_collection.create_index(
             [("username", ASCENDING), ("timestamp", DESCENDING)],
             name="username_timestamp"
         )
-        
+
         instagram_metrics_collection.create_index(
             [("timestamp", DESCENDING)],
             name="timestamp_desc"
         )
-        
+
         # Instagram Metrics - TTL for auto-cleanup (30 days)
         instagram_metrics_collection.create_index(
             [("timestamp", ASCENDING)],
             expireAfterSeconds=2592000,  # 30 days TTL
             name="ttl_30days"
         )
-        
+
         logger.info("✅ Instagram indexes created")
-        
+
         # ------------------------------------------------------------
         # TIKTOK INDEXES
         # ------------------------------------------------------------
-        
+
         # TikTok Cache - username lookup (unique)
         tiktok_cache_collection.create_index(
             [("username", ASCENDING)],
             unique=True,
             name="username_unique"
         )
-        
+
         # TikTok Cache - cached_at for sorting
         tiktok_cache_collection.create_index(
             [("cached_at", DESCENDING)],
             name="cached_at_desc"
         )
-        
+
         # TikTok Refresh Locks - username lookup (UNIQUE - CRITICAL FOR ATOMICITY)
         tiktok_refresh_lock_collection.create_index(
             [("username", ASCENDING)],
             unique=True,  # ← CRITICAL: Enforces atomic lock acquisition
             name="username_unique_lock"
         )
-        
+
         # TikTok Refresh Locks - TTL cleanup (failsafe)
         tiktok_refresh_lock_collection.create_index(
             [("expires_at", ASCENDING)],
             expireAfterSeconds=0,
             name="ttl_expires_at"
         )
-        
+
         # TikTok Retry Queue - status and next_retry_at
         tiktok_retry_queue_collection.create_index(
             [("status", ASCENDING), ("next_retry_at", ASCENDING)],
             name="status_next_retry"
         )
-        
+
         tiktok_retry_queue_collection.create_index(
             [("username", ASCENDING)],
             name="username_lookup"
         )
-        
+
         tiktok_retry_queue_collection.create_index(
             [("created_at", DESCENDING)],
             name="created_at_desc"
         )
-        
+
         # TikTok Retry Queue - TTL for old failed items (auto-cleanup)
         tiktok_retry_queue_collection.create_index(
             [("failed_at", ASCENDING)],
             expireAfterSeconds=604800,  # 7 days TTL for failed items
             name="ttl_7days_failed"
         )
-        
+
         # TikTok Metrics - username and timestamp
         tiktok_metrics_collection.create_index(
             [("username", ASCENDING), ("timestamp", DESCENDING)],
             name="username_timestamp"
         )
-        
+
         tiktok_metrics_collection.create_index(
             [("timestamp", DESCENDING)],
             name="timestamp_desc"
         )
-        
+
         # TikTok Metrics - TTL for auto-cleanup (30 days)
         tiktok_metrics_collection.create_index(
             [("timestamp", ASCENDING)],
             expireAfterSeconds=2592000,  # 30 days TTL
             name="ttl_30days"
         )
-        
+
         logger.info("✅ TikTok indexes created")
-        
+
         # ------------------------------------------------------------
         # USER MANAGEMENT INDEXES
         # ------------------------------------------------------------
-        
+
         # Users - email lookup (unique)
         users_collection.create_index(
             [("email", ASCENDING)],
             unique=True,
             name="email_unique"
         )
-        
+
         # Users - created_at for sorting
         users_collection.create_index(
             [("created_at", DESCENDING)],
             name="created_at_desc"
         )
-        
+
         # Reset Tokens - token lookup + TTL
         reset_tokens_collection.create_index(
             [("token", ASCENDING)],
             unique=True,
             name="token_unique"
         )
-        
+
         reset_tokens_collection.create_index(
             [("created_at", ASCENDING)],
             expireAfterSeconds=3600,  # 1 hour TTL
             name="ttl_1hour"
         )
-        
+
         logger.info("✅ User management indexes created")
-        
+
         logger.info("✅ All MongoDB indexes created successfully")
-        
+
     except Exception as e:
         logger.error(f"❌ Error creating MongoDB indexes: {e}")
         raise
@@ -354,12 +416,16 @@ def check_database_health() -> dict:
     try:
         # Ping server
         client.admin.command('ping')
-        
+
         # Get database stats
         stats = db.command("dbstats")
-        
+
         # Count documents in each collection
         collection_counts = {
+            "bookings": booking_collection.count_documents({}),
+            "payments": payments_collection.count_documents({}),
+            "payments_razorpay": payments_collection.count_documents({"provider": "razorpay"}),
+            "payments_khalti": payments_collection.count_documents({"provider": "khalti"}),
             "instagram_cache": instagram_reels_collection.count_documents({}),
             "instagram_refresh_locks": instagram_refresh_lock_collection.count_documents({}),
             "instagram_retry_queue": instagram_retry_queue_collection.count_documents({}),
@@ -370,9 +436,8 @@ def check_database_health() -> dict:
             "tiktok_metrics": tiktok_metrics_collection.count_documents({}),
             "users": users_collection.count_documents({}),
             "reset_tokens": reset_tokens_collection.count_documents({}),
-            "payments": payments_collection.count_documents({})
         }
-        
+
         return {
             "status": "healthy",
             "connected": True,
@@ -381,7 +446,7 @@ def check_database_health() -> dict:
             "collections": collection_counts,
             "total_documents": sum(collection_counts.values())
         }
-        
+
     except Exception as e:
         logger.error(f"❌ Database health check failed: {e}")
         return {
@@ -398,27 +463,27 @@ def check_database_health() -> dict:
 def migrate_old_collection_names():
     """
     Migration helper to rename old collections to new naming convention.
-    
+
     OLD NAMES:
     - cloudinary_retry_queue → instagram_retry_queue
-    
+
     Run this once if upgrading from old schema.
     """
     try:
         logger.info("🔄 Starting collection migration...")
-        
+
         # Check if old collection exists
         if "cloudinary_retry_queue" in db.list_collection_names():
             logger.info("📦 Found old 'cloudinary_retry_queue' collection")
-            
+
             # Rename to new convention
             db["cloudinary_retry_queue"].rename("instagram_retry_queue")
             logger.info("✅ Renamed 'cloudinary_retry_queue' → 'instagram_retry_queue'")
         else:
             logger.info("ℹ️ No old 'cloudinary_retry_queue' collection found (migration not needed)")
-        
+
         logger.info("✅ Collection migration complete")
-        
+
     except Exception as e:
         logger.error(f"❌ Migration failed: {e}")
         raise
@@ -431,28 +496,28 @@ def migrate_old_collection_names():
 def cleanup_old_data(days: int = 30):
     """
     Clean up old data from metrics and completed retry queue items.
-    
+
     Args:
         days: Number of days to keep (default 30)
     """
     try:
         from datetime import datetime, timedelta
         cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
+
         logger.info(f"🧹 Cleaning up data older than {days} days...")
-        
+
         # Clean old Instagram metrics
         instagram_result = instagram_metrics_collection.delete_many({
             "timestamp": {"$lt": cutoff_date}
         })
         logger.info(f"🗑️ Deleted {instagram_result.deleted_count} old Instagram metrics")
-        
+
         # Clean old TikTok metrics
         tiktok_result = tiktok_metrics_collection.delete_many({
             "timestamp": {"$lt": cutoff_date}
         })
         logger.info(f"🗑️ Deleted {tiktok_result.deleted_count} old TikTok metrics")
-        
+
         # Note: Failed retry items auto-clean via TTL (7 days)
         # We only manually clean very old pending items that somehow got stuck
         instagram_retry_result = instagram_retry_queue_collection.delete_many({
@@ -460,22 +525,22 @@ def cleanup_old_data(days: int = 30):
             "created_at": {"$lt": cutoff_date}
         })
         logger.info(f"🗑️ Deleted {instagram_retry_result.deleted_count} stuck Instagram retry items")
-        
+
         tiktok_retry_result = tiktok_retry_queue_collection.delete_many({
             "status": "pending",
             "created_at": {"$lt": cutoff_date}
         })
         logger.info(f"🗑️ Deleted {tiktok_retry_result.deleted_count} stuck TikTok retry items")
-        
+
         total_deleted = (
-            instagram_result.deleted_count + 
-            tiktok_result.deleted_count + 
-            instagram_retry_result.deleted_count + 
+            instagram_result.deleted_count +
+            tiktok_result.deleted_count +
+            instagram_retry_result.deleted_count +
             tiktok_retry_result.deleted_count
         )
-        
+
         logger.info(f"✅ Cleanup complete: {total_deleted} documents deleted")
-        
+
         return {
             "success": True,
             "total_deleted": total_deleted,
@@ -484,7 +549,7 @@ def cleanup_old_data(days: int = 30):
             "instagram_retry_queue": instagram_retry_result.deleted_count,
             "tiktok_retry_queue": tiktok_retry_result.deleted_count
         }
-        
+
     except Exception as e:
         logger.error(f"❌ Cleanup failed: {e}")
         return {
@@ -511,6 +576,16 @@ except Exception as e:
 logger.info("=" * 60)
 logger.info("📊 DATABASE MODULE LOADED - PRODUCTION READY")
 logger.info("=" * 60)
+logger.info("Payments Collection (Multi-Provider):")
+logger.info("  - booking_id (lookup)")
+logger.info("  - provider (razorpay | khalti)")
+logger.info("  - (booking_id, provider) compound")
+logger.info("  - (booking_id, status) compound")
+logger.info("  - payment_id UNIQUE PARTIAL (not null)")
+logger.info("  - pidx UNIQUE PARTIAL (Khalti, not null)")
+logger.info("  - order_id (lookup)")
+logger.info("  - fraud_flag (monitoring)")
+logger.info("")
 logger.info("Instagram Collections:")
 logger.info("  - instagram_cache (NO TTL - logical expiry only)")
 logger.info("  - instagram_refresh_locks (TTL: expires_at, UNIQUE)")
@@ -532,4 +607,6 @@ logger.info("  - Refresh locks: UNIQUE on username (atomic acquire)")
 logger.info("  - Refresh locks: TTL on expires_at (auto-cleanup)")
 logger.info("  - Retry queue: TTL on failed_at (auto-cleanup)")
 logger.info("  - Metrics: TTL on timestamp (30 days auto-cleanup)")
+logger.info("  - payments.pidx: UNIQUE PARTIAL (Khalti idempotency)")
+logger.info("  - payments.payment_id: UNIQUE PARTIAL (cross-provider)")
 logger.info("=" * 60)

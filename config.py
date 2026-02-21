@@ -39,7 +39,11 @@ BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 # ----------------------
 # Frontend URL
 # ----------------------
-FRONTEND_URL = os.getenv("FRONTEND_URL")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+# Website URL — used as website_url in Khalti payment initiation payload.
+# Defaults to FRONTEND_URL.
+WEBSITE_URL = FRONTEND_URL
 
 # ----------------------
 # Permanent Admins (Auto-create on first reset)
@@ -80,28 +84,39 @@ CORS_ORIGINS = [
 ]
 
 # ----------------------
-# Cloudinary Configuration (ADDED)
+# Cloudinary Configuration
 # ----------------------
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
 
 # ----------------------
-# File Upload Configuration (ADDED)
+# File Upload Configuration
 # ----------------------
 MAX_FILE_SIZE_MB = 5  # Maximum file size in MB
 ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/jpg", "image/webp"]
 
-
-# Instagram Fetching API
+# ----------------------
+# Instagram / TikTok RapidAPI
+# ----------------------
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 INSTAGRAM_RAPIDAPI_HOST = os.getenv("INSTAGRAM_RAPIDAPI_HOST")
-TIKTOK_RAPIDAPI_HOST =  os.getenv("TIKTOK_RAPIDAPI_HOST")
-
+TIKTOK_RAPIDAPI_HOST = os.getenv("TIKTOK_RAPIDAPI_HOST")
 
 # =========================
-# RAZORPAY
+# RAZORPAY (India — INR)
+# Test keys: dashboard.razorpay.com/app/keys
 # =========================
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
+
+# =========================
+# KHALTI (Nepal — NPR)
+# Sandbox secret key from: test-admin.khalti.com
+# Production secret key from: admin.khalti.com
+# Sandbox base URL:    https://dev.khalti.com
+# Production base URL: https://khalti.com
+# =========================
+KHALTI_SECRET_KEY = os.getenv("KHALTI_SECRET_KEY")
+KHALTI_BASE_URL = os.getenv("KHALTI_BASE_URL", "https://dev.khalti.com")

@@ -1,3 +1,6 @@
+# utils/serializers.py
+
+
 from datetime import datetime
 
 def serialize_booking(booking: dict) -> dict:

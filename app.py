@@ -27,7 +27,6 @@ from routes_admin_analytics import router as admin_analytics_router
 from routes_admin_events import router as admin_events_router
 from routes_payment_webhooks import router as payment_webhook_router
 
-
 # Agent
 from agent import AgentOrchestrator, create_agent_router
 
@@ -58,9 +57,9 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("🚀 APPLICATION STARTING UP")
     logger.info("=" * 60)
-    logger.info("📦 Service: JinniChirag Website Backend v2.0.0")
+    logger.info("📦 Service: JinniChirag Website Backend v3.0.0")
     logger.info("📸 Image Storage: Cloudinary configured")
-    logger.info("💳 Payment Gateway: Razorpay (India - Default)")
+    logger.info("💳 Payment Gateways: Razorpay (INR) + Khalti (NPR)")
 
     try:
         # Initialize Agent Orchestrator
@@ -69,13 +68,21 @@ async def lifespan(app: FastAPI):
         app.include_router(agent_router)
         logger.info("✅ Agent router configured")
 
-        # Verify Payment Service
+        # Verify Razorpay Payment Service
         try:
             from payment.razorpay_payment_service import get_razorpay_service
-            razorpay_service = get_razorpay_service()
+            get_razorpay_service()
             logger.info("✅ Razorpay payment service initialized")
         except Exception as e:
-            logger.warning(f"⚠️ Payment service initialization warning: {e}")
+            logger.warning(f"⚠️ Razorpay service initialization warning: {e}")
+
+        # Verify Khalti Payment Service
+        try:
+            from payment.khalti_payment_service import get_khalti_service
+            get_khalti_service()
+            logger.info("✅ Khalti payment service initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Khalti service initialization warning: {e}")
 
         # Database health check
         try:
@@ -113,13 +120,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Shutdown error: {e}", exc_info=True)
 
+
 # ----------------------
 # App Setup
 # ----------------------
 app = FastAPI(
     title="JinniChirag Website Backend",
-    description="Backend API for JinniChirag booking system with AI agent, Event Management, and Integrated Payment Processing",
-    version="2.0.0",
+    description="Backend API for JinniChirag booking system with AI agent, Event Management, and Multi-Provider Payment Processing (Razorpay INR + Khalti NPR)",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -180,7 +188,7 @@ async def root():
     """Root endpoint - service status"""
     return {
         "service": "JinniChirag Website Backend",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "status": "running",
         "timestamp": datetime.utcnow().isoformat(),
         "endpoints": {
@@ -194,17 +202,24 @@ async def root():
         "features": [
             "AI Chatbot (Multi-language)",
             "Service Bookings with OTP",
-            "Integrated Payment Processing (Razorpay)",
-            "Admin Approval with Payment Link",
+            "Multi-Provider Payment Processing (Razorpay + Khalti)",
+            "Admin Approval with Payment Options Link",
             "Event Management",
             "WhatsApp Notifications"
         ],
         "payment": {
-            "default_provider": "Razorpay (India)",
-            "webhook": "/razorpay/webhook",
-            "approval_flow": "Admin approves → Payment link sent via WhatsApp"
+            "providers": {
+                "razorpay": "INR (India)",
+                "khalti": "NPR (Nepal)"
+            },
+            "webhooks": {
+                "razorpay": "/razorpay/webhook",
+                "khalti": "/khalti/webhook"
+            },
+            "approval_flow": "Admin approves → WhatsApp payment-options link → User selects provider → Pays → Webhook confirms"
         }
     }
+
 
 @app.get("/health")
 async def health():
@@ -231,16 +246,33 @@ async def health():
         }
         health_status["status"] = "degraded"
 
-    # Check Payment Service
+    # Check Razorpay Payment Service
     try:
         from payment.razorpay_payment_service import get_razorpay_service
-        razorpay_service = get_razorpay_service()
-        health_status["services"]["payment"] = {
+        get_razorpay_service()
+        health_status["services"]["razorpay"] = {
             "status": "healthy",
-            "provider": "razorpay"
+            "provider": "razorpay",
+            "currency": "INR"
         }
     except Exception as e:
-        health_status["services"]["payment"] = {
+        health_status["services"]["razorpay"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+        health_status["status"] = "degraded"
+
+    # Check Khalti Payment Service
+    try:
+        from payment.khalti_payment_service import get_khalti_service
+        get_khalti_service()
+        health_status["services"]["khalti"] = {
+            "status": "healthy",
+            "provider": "khalti",
+            "currency": "NPR"
+        }
+    except Exception as e:
+        health_status["services"]["khalti"] = {
             "status": "unhealthy",
             "error": str(e)
         }
@@ -277,7 +309,7 @@ app.include_router(
 )
 logger.info("✅ Loaded: Public Chat Routes (/chat)")
 
-# Booking Service (Includes Payment Endpoints)
+# Booking Service (Includes Multi-Provider Payment Endpoints)
 app.include_router(
     bookings_router,
     tags=["Public - Bookings & Payments"]
@@ -292,11 +324,13 @@ logger.info("✅ Loaded: Payment Webhook Routes")
 logger.info("   ├── POST /razorpay/webhook")
 logger.info("   └── POST /khalti/webhook")
 
-
-logger.info("✅ Loaded: Public Booking Routes with Payment (/bookings)")
+logger.info("✅ Loaded: Public Booking Routes with Multi-Provider Payment (/bookings)")
 logger.info("   ├── POST /bookings/request")
 logger.info("   ├── POST /bookings/verify-otp")
-logger.info("   ├── POST /razorpay/webhook")
+logger.info("   ├── POST /bookings/{id}/create-payment  ← NEW (razorpay|khalti)")
+logger.info("   ├── POST /bookings/razorpay/verify-payment")
+logger.info("   ├── POST /bookings/khalti/verify-payment  ← NEW")
+logger.info("   ├── POST /bookings/payment-failed")
 logger.info("   ├── GET  /bookings/{id}/payment-status")
 logger.info("   └── POST /bookings/{id}/cancel")
 
@@ -331,16 +365,16 @@ app.include_router(
 )
 logger.info("✅ Loaded: Admin Auth Routes")
 
-# Admin Booking Management (Includes Payment Management)
+# Admin Booking Management (Multi-Provider Payment Management)
 app.include_router(
     admin_bookings_router,
     tags=["Admin - Bookings & Payments"]
 )
-logger.info("✅ Loaded: Admin Booking Routes with Payment")
-logger.info("   ├── PATCH /admin/bookings/{id}/status (creates payment link)")
-logger.info("   ├── POST  /admin/bookings/{id}/refund")
+logger.info("✅ Loaded: Admin Booking Routes with Multi-Provider Payment")
+logger.info("   ├── PATCH /admin/bookings/{id}/status  ← sets APPROVED + amount only")
+logger.info("   ├── POST  /admin/bookings/{id}/refund  ← provider-aware refund")
 logger.info("   ├── GET   /admin/bookings/{id}/payment-history")
-logger.info("   └── GET   /admin/bookings/payments/analytics")
+logger.info("   └── GET   /admin/bookings/payments/analytics  ← multi-provider")
 
 # Admin Knowledge Base
 app.include_router(
@@ -375,23 +409,38 @@ logger.info("ℹ️ Agent router will be loaded during startup")
 async def api_info():
     """Get comprehensive API information"""
     return {
-        "api_version": "2.0.0",
+        "api_version": "3.0.0",
         "service": "JinniChirag Website Backend",
         "documentation": {
             "swagger": "/docs",
             "redoc": "/redoc"
         },
         "architecture": {
-            "payment_integration": "Consolidated in booking routes",
-            "payment_webhook": "/razorpay/webhook",
-            "approval_triggers_payment": True
+            "payment_integration": "Multi-Provider Payment Orchestration Layer",
+            "providers": {
+                "razorpay": {
+                    "currency": "INR",
+                    "webhook": "POST /razorpay/webhook",
+                    "verify": "POST /bookings/razorpay/verify-payment"
+                },
+                "khalti": {
+                    "currency": "NPR",
+                    "webhook": "POST /khalti/webhook",
+                    "verify": "POST /bookings/khalti/verify-payment"
+                }
+            },
+            "approval_triggers_payment": False,
+            "approval_flow": "Admin sets APPROVED + amount → WhatsApp payment-options link → User selects provider"
         },
         "endpoint_groups": {
             "public": {
                 "chat": "/chat (AI Chatbot)",
-                "bookings": "/bookings (Bookings + Payment)",
+                "bookings": "/bookings (Bookings + Multi-Provider Payment)",
                 "events": "/events (Public Events)",
-                "payment_webhook": "/razorpay/webhook"
+                "webhooks": {
+                    "razorpay": "/razorpay/webhook",
+                    "khalti": "/khalti/webhook"
+                }
             },
             "admin": {
                 "auth": "/admin/auth (Admin Authentication)",
@@ -406,23 +455,24 @@ async def api_info():
             }
         },
         "features": {
-            "booking_flow": "OTP → Verify → Pending → Admin Approves (creates payment) → User Pays → Confirmed",
+            "booking_flow": "OTP → Verify → Pending → Admin Approves (amount set) → User selects Razorpay/Khalti → Pays → Confirmed",
             "payment_providers": {
-                "india": "Razorpay (Active)",
-                "nepal": "Khalti (Coming Soon)",
-                "default": "Razorpay"
+                "india": "Razorpay (INR) - Active",
+                "nepal": "Khalti (NPR) - Active"
             },
             "notifications": "WhatsApp (Twilio)",
             "languages": ["English", "Nepali", "Hindi", "Marathi"]
         },
         "approval_workflow": {
-            "step_1": "Admin approves booking via PATCH /admin/bookings/{id}/status",
-            "step_2": "Payment order created automatically via Razorpay",
-            "step_3": "Payment link sent to customer via WhatsApp",
-            "step_4": "Customer pays via secure Razorpay checkout",
-            "step_5": "Webhook confirms payment → Booking auto-confirmed"
+            "step_1": "Admin approves booking via PATCH /admin/bookings/{id}/status (sets amount, NO payment order created)",
+            "step_2": "WhatsApp sent with generic payment-options link to customer",
+            "step_3": "Customer visits link → selects Razorpay or Khalti",
+            "step_4": "Frontend calls POST /bookings/{id}/create-payment with chosen provider",
+            "step_5": "Customer completes payment on provider checkout",
+            "step_6": "Webhook fires → backend verifies via API → Booking CONFIRMED"
         }
     }
+
 
 # ----------------------
 # Run Application
@@ -441,7 +491,7 @@ if __name__ == "__main__":
     logger.info(f"🔌 Port: {port}")
     logger.info(f"📚 Docs: http://{host}:{port}/docs")
     logger.info(f"🔍 ReDoc: http://{host}:{port}/redoc")
-    logger.info(f"💳 Payment: Integrated in /bookings routes")
+    logger.info(f"💳 Payment: Razorpay (INR) + Khalti (NPR)")
     logger.info("=" * 60)
 
     uvicorn.run(
