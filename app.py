@@ -6,7 +6,8 @@ import uuid
 from typing import Dict, Any
 from datetime import datetime
 from contextlib import asynccontextmanager
-
+import uvicorn
+import os
 from config import CORS_ORIGINS
 
 # ----------------------
@@ -33,10 +34,18 @@ from agent import AgentOrchestrator, create_agent_router
 # ----------------------
 # Logging Configuration
 # ----------------------
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+
+if ENVIRONMENT == "production":
+    LOG_LEVEL = logging.WARNING   # warnings + errors + critical
+else:
+    LOG_LEVEL = logging.INFO     # full visibility locally
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=LOG_LEVEL,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+
 logger = logging.getLogger(__name__)
 
 # ----------------------
@@ -478,26 +487,17 @@ async def api_info():
 # Run Application
 # ----------------------
 if __name__ == "__main__":
-    import uvicorn
-    import os
+
+    ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 
     port = int(os.environ.get("PORT", 8000))
     host = os.environ.get("HOST", "0.0.0.0")
-
-    logger.info("=" * 60)
-    logger.info("🌐 STARTING JINNICHIRAG BACKEND SERVER")
-    logger.info("=" * 60)
-    logger.info(f"📍 Host: {host}")
-    logger.info(f"🔌 Port: {port}")
-    logger.info(f"📚 Docs: http://{host}:{port}/docs")
-    logger.info(f"🔍 ReDoc: http://{host}:{port}/redoc")
-    logger.info(f"💳 Payment: Razorpay (INR) + Khalti (NPR)")
-    logger.info("=" * 60)
 
     uvicorn.run(
         "app:app",
         host=host,
         port=port,
-        reload=True,
-        log_level="info"
+        reload=(ENVIRONMENT == "development"),
+        log_level="debug" if ENVIRONMENT == "development" else "warning",
+        access_log=(ENVIRONMENT == "development"),
     )
