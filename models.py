@@ -1,4 +1,3 @@
-# models.py
 # ============================================================
 # PYDANTIC MODELS FOR API VALIDATION
 # ============================================================
@@ -389,6 +388,14 @@ class EventBase(BaseModel):
     gallery_images: List[str] = []
     is_active: bool = True
     status: EventStatus = EventStatus.DRAFT
+    currency: str = "INR"
+
+    @validator('currency')
+    def validate_currency(cls, v):
+        v = v.upper()
+        if v not in ("INR", "NPR"):
+            raise ValueError("Currency must be INR or NPR")
+        return v
 
     @validator('date_from', 'date_to', pre=True)
     def parse_date(cls, value):
@@ -443,6 +450,16 @@ class EventUpdate(BaseModel):
     gallery_images: Optional[List[str]] = None
     is_active: Optional[bool] = None
     status: Optional[EventStatus] = None
+    currency: Optional[str] = None
+
+    @validator('currency')
+    def validate_currency(cls, v):
+        if v is not None:
+            v = v.upper()
+            if v not in ("INR", "NPR"):
+                raise ValueError("Currency must be INR or NPR")
+            return v
+        return v
 
     @validator('total_seats')
     def validate_seats(cls, v):
@@ -475,6 +492,101 @@ class EventInDB(EventBase):
             datetime: lambda v: v.isoformat() if v else None,
             date: lambda v: v.isoformat() if v else None
         }
+
+
+# ==========================================================
+# EVENT BOOKING MODELS
+# ==========================================================
+
+class EventBookingStatus(str, Enum):
+    PENDING_PAYMENT = "pending_payment"
+    PAID = "paid"
+    CONFIRMED = "confirmed"
+    CANCELLED = "cancelled"
+    REFUNDED = "refunded"
+
+
+class EventBookingRequest(BaseModel):
+    event_id: str
+    price_category_name: str
+    name: str
+    email: EmailStr
+    phone: str
+    phone_country: str
+    message: Optional[str] = None
+
+    @validator('phone')
+    def validate_phone(cls, v):
+        import re
+        if not re.match(r'^\+\d{10,15}$', v):
+            raise ValueError('Phone must include country code (e.g., +919876543210)')
+        return v
+
+
+class EventBookingOtpVerify(BaseModel):
+    booking_id: str
+    otp: str
+
+    @validator('otp')
+    def validate_otp(cls, v):
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError('OTP must be 6 digits')
+        return v
+
+
+class EventBookingPaymentCreate(BaseModel):
+    provider: PaymentProvider
+
+    @validator('provider')
+    def validate_provider(cls, v):
+        allowed = {p.value for p in PaymentProvider}
+        if v not in allowed:
+            raise ValueError(f"Provider must be one of {sorted(allowed)}")
+        return v
+
+
+class EventBookingUpdateStatus(BaseModel):
+    status: EventBookingStatus
+    cancellation_reason: Optional[str] = None
+
+    @validator('status')
+    def validate_status(cls, v):
+        return v
+
+
+class EventRazorpayVerifyRequest(BaseModel):
+    booking_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class EventKhaltiVerifyRequest(BaseModel):
+    booking_id: str
+    pidx: str
+    status: Optional[str] = None
+    transaction_id: Optional[str] = None
+
+    @validator('pidx')
+    def validate_pidx(cls, v):
+        if not v or not v.strip():
+            raise ValueError("pidx is required")
+        return v.strip()
+
+
+class EventPaymentFailedRequest(BaseModel):
+    booking_id: str
+    reason: str
+    provider: Optional[str] = "razorpay"
+
+    @validator('provider')
+    def validate_provider(cls, v):
+        if v is not None:
+            allowed = {"razorpay", "khalti"}
+            if v.lower() not in allowed:
+                raise ValueError(f"Provider must be one of {sorted(allowed)}")
+            return v.lower()
+        return v
 
 
 # ==========================================================
