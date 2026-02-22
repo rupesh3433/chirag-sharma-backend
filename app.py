@@ -20,6 +20,8 @@ from routes_public_events import router as public_events_router
 from routes_public_instagramFetch import router as instagram_router
 from routes_public_tiktokFetch import router as tiktok_router
 
+from visitor_tracking import setup_visitor_tracking
+
 # Admin Routes
 from routes_admin_auth import router as admin_auth_router
 from routes_admin_bookings import router as admin_bookings_router  # Includes payment management
@@ -141,6 +143,13 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan
 )
+
+# ----------------------
+# Visitor Tracking Middleware
+# ----------------------
+from visitor_tracking import setup_visitor_tracking
+setup_visitor_tracking(app)
+logger.info("✅ Visitor Tracking Middleware Registered")
 
 # ----------------------
 # CORS Middleware

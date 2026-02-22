@@ -273,6 +273,27 @@ async def get_event_bookings_stats(
     return {"success": True, "stats": stats}
 
 
+@router.get("/bookings/by-ticket/{ticket_code}", response_model=dict)
+async def get_booking_by_ticket_code(
+    ticket_code: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """
+    Look up a booking by ticket code.
+    Useful for manual ticket scanning at event entry.
+    """
+    booking = event_bookings_collection.find_one(
+        {"ticket_code": ticket_code.strip().upper()}
+    )
+    if not booking:
+        raise HTTPException(status_code=404, detail="No booking found with this ticket code")
+
+    return {
+        "success": True,
+        "booking": format_event_booking(booking),
+    }
+
+
 @router.get("/bookings/{booking_id}", response_model=dict)
 async def get_event_booking_detail(
     booking_id: str,
@@ -286,13 +307,28 @@ async def get_event_booking_detail(
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    payment_record = payments_collection.find_one(
-        {
-            "booking_id": ObjectId(booking_id),
-            "booking_type": "event",
-        },
-        sort=[("created_at", -1)],
-    )
+    # ----------------------------------------------------------------
+    # FIX: Look up payment record using the IDs stored ON the booking
+    # (payment_order_id for Razorpay, payment_pidx for Khalti).
+    # The payments collection stores session_id, NOT booking_id, so
+    # querying by booking_id always returns nothing.
+    # ----------------------------------------------------------------
+    payment_record = None
+
+    razorpay_order_id = booking.get("payment_order_id")
+    khalti_pidx = booking.get("payment_pidx")
+
+    or_clauses = []
+    if razorpay_order_id:
+        or_clauses.append({"order_id": razorpay_order_id})
+    if khalti_pidx:
+        or_clauses.append({"pidx": khalti_pidx})
+
+    if or_clauses:
+        payment_record = payments_collection.find_one(
+            {"$or": or_clauses},
+            sort=[("created_at", -1)],
+        )
 
     payment_info = None
     if payment_record:
@@ -530,27 +566,6 @@ async def verify_ticket_by_code(
         "ticket_code": ticket_code,
         "checked_in_at": now.isoformat(),
         "already_checked_in": False,
-    }
-
-
-@router.get("/bookings/by-ticket/{ticket_code}", response_model=dict)
-async def get_booking_by_ticket_code(
-    ticket_code: str,
-    current_admin: dict = Depends(get_current_admin)
-):
-    """
-    Look up a booking by ticket code.
-    Useful for manual ticket scanning at event entry.
-    """
-    booking = event_bookings_collection.find_one(
-        {"ticket_code": ticket_code.strip().upper()}
-    )
-    if not booking:
-        raise HTTPException(status_code=404, detail="No booking found with this ticket code")
-
-    return {
-        "success": True,
-        "booking": format_event_booking(booking),
     }
 
 
