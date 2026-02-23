@@ -255,54 +255,64 @@ async def global_exception_handler(request: Request, exc: Exception):
 # WEBSOCKET — REAL-TIME LIVE VIEWERS
 # ============================================================
 
+VSID_COOKIE = "__vsid"   # Must match visitor_tracking.COOKIE_NAME
+
+
 @app.websocket("/ws/live")
 async def websocket_live_viewers(websocket: WebSocket):
     """
-    WebSocket endpoint for real-time live viewer count.
+    Public-only WebSocket endpoint for real-time live viewer tracking.
 
-    Each browser tab that connects is registered as one live viewer.
-    On connect: registered + count broadcast to all clients.
-    On message: treated as a ping (updates last_activity timestamp).
-    On disconnect or 30s inactivity: removed + count rebroadcast.
+    Qualification rules (enforced in ws_live.py LiveViewerManager):
+      - Must stay connected ≥ 8 seconds to count as live
+      - session_id deduplication: multi-tab from same session = 1 viewer
+      - Reconnect-safe: same session_id in same hour = not re-counted in hourly
 
-    Scales to 5,000+ concurrent WebSocket connections via async I/O.
-    Background cleanup task runs every 10 seconds.
-
-    Message format sent to client:
-        {"type": "live_count", "count": <int>}
-
-    Message format for ping from client (any text):
-        → server replies with {"type": "pong", "count": <int>}
-
-    Frontend usage:
-        const ws = new WebSocket("wss://your-api.com/ws/live");
-        ws.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            if (data.type === "live_count") setLiveCount(data.count);
-        };
-        setInterval(() => ws.send("ping"), 15000);  // keep alive
+    Admin users are NEVER counted:
+      - Authorization header present → reject
+      - admin_token cookie present   → reject
     """
-    conn_id = str(uuid.uuid4())
 
-    await live_manager.connect(websocket, conn_id)
+    # ── Block admin users ─────────────────────────────────────────
+
+    auth_header = websocket.headers.get("authorization")
+    if auth_header:
+        await websocket.close(code=1008)
+        return
+
+    admin_cookie = websocket.cookies.get("admin_token")
+    if admin_cookie:
+        await websocket.close(code=1008)
+        return
+
+    # ── Extract session_id from __vsid cookie ─────────────────────
+    # visitor_tracking.py sets this cookie on every tracked page request.
+    # Format: sha256(ip_hash + ":" + hour_bucket)[:32]
+    # If cookie is missing (direct WS connect, bot, etc.) use conn_id
+    # as fallback — it will still work but won't dedup across tabs.
+
+    vsid       = websocket.cookies.get(VSID_COOKIE, "").strip()
+    conn_id    = str(uuid.uuid4())
+    session_id = vsid if vsid else f"anon-{conn_id}"
+
+    # ✅ live_manager.connect() calls websocket.accept() internally
+    await live_manager.connect(websocket, conn_id, session_id)
 
     try:
         while True:
-            # Receive any message → treat as heartbeat ping
-            _data = await websocket.receive_text()
+            msg = await websocket.receive_text()
+
+            # Any message is treated as a keepalive ping
             await live_manager.ping(conn_id)
 
-            # Reply with current count (pong)
-            try:
-                await websocket.send_json({
-                    "type":  "pong",
-                    "count": live_manager.get_live_count(),
-                })
-            except Exception:
-                break  # Connection broken — exit loop to disconnect
+            # Send pong with current live count
+            await websocket.send_json({
+                "type":  "pong",
+                "count": live_manager.get_live_count(),
+            })
 
     except WebSocketDisconnect:
-        pass  # Normal client disconnect
+        pass
     except Exception as exc:
         logger.debug("WS error [%s]: %s", conn_id[:8], exc)
     finally:

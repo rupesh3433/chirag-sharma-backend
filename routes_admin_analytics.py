@@ -6,9 +6,12 @@
 # ───────────────────────────────────────────────────────
 #
 # LIVE VIEWERS (WebSocket-based):
-#   live_manager.get_live_count() → exact, real-time count of
-#   currently connected WebSocket clients (/ws/live).
+#   live_manager.get_live_count() → qualified sessions (≥ 8s connected).
 #   Fallback: site_sessions query if WebSocket not deployed.
+#
+# LIVE HOURLY (durable per-hour unique qualified sessions):
+#   live_hourly collection — $addToSet per session_id per hour bucket.
+#   GET /admin/analytics/live-hourly → current_live_active + unique_this_hour
 #
 # COUNTER-BASED STATS (analytics_counters collection):
 #   Single document {_id:"global"} with atomic $inc fields.
@@ -22,7 +25,7 @@
 #
 # COUNTING RULES
 # ─────────────────────────────────────────────────────────────────
-#   LIVE:       ws_live.live_manager.get_live_count()
+#   LIVE:       ws_live.live_manager.get_live_count()  (qualified, ≥ 8s)
 #   HOURLY:     count sessions where hour_bucket == current_hour_bucket
 #   DAILY:      first_seen >= today 00:00 UTC
 #   WEEKLY:     first_seen >= Monday 00:00 UTC (ISO week)
@@ -186,9 +189,8 @@ async def get_live_viewers(admin: dict = Depends(get_current_admin)):
     Real-time live viewer count.
 
     PRIMARY (WebSocket-based):
-      live_manager.get_live_count() — exact count of connected WS clients.
-      Each browser tab that has /ws/live open is one live viewer.
-      Inactive 30s+ → auto-removed by WS cleanup task.
+      live_manager.get_live_count() — qualified sessions (≥ 8s connected).
+      Multi-tab safe: same session_id from multiple tabs = 1 live viewer.
 
     FALLBACK (if WebSocket count == 0, heartbeat legacy):
       last_seen >= now - 90s from site_sessions.
@@ -288,6 +290,63 @@ async def get_live_viewers(admin: dict = Depends(get_current_admin)):
             "latest_page":      None,
             "latest_duration":  0,
             "as_of":            datetime.utcnow().isoformat(),
+        }
+
+
+# ─────────────────────────────────────────────────────────────────
+# LIVE HOURLY  (durable per-hour unique qualified sessions)
+# ─────────────────────────────────────────────────────────────────
+
+@router.get("/live-hourly")
+async def get_live_hourly(
+    hour: Optional[str] = Query(None, description="Hour bucket YYYY-MM-DD-HH. Defaults to current UTC hour."),
+    admin: dict = Depends(get_current_admin),
+):
+    """
+    Live viewer stats combining real-time presence + durable hourly analytics.
+
+    current_live_active — sessions CURRENTLY qualified (WebSocket, ≥ 8s threshold)
+    unique_this_hour    — distinct sessions that qualified during this UTC hour
+                          (stored in live_hourly MongoDB collection, reconnect-safe)
+
+    The distinction:
+        current_live_active = who is on the site RIGHT NOW
+        unique_this_hour    = how many distinct people visited and qualified this hour
+                              (even if they left 30 minutes ago)
+    """
+    try:
+        from ws_live import live_manager, get_hourly_stats
+
+        now         = datetime.utcnow()
+        target_hour = hour if hour else _hour_bucket(now)
+
+        # Real-time count from WebSocket manager (in-memory)
+        live_now = live_manager.get_live_count()
+
+        # Durable hourly unique count from MongoDB live_hourly collection
+        hourly = get_hourly_stats(target_hour)
+
+        return {
+            "success":             True,
+            "current_hour":        target_hour,
+            "current_live_active": live_now,
+            "unique_this_hour":    hourly["unique_count"],
+            "sessions_this_hour":  hourly["sessions_count"],
+            "source":              "websocket",
+            "qualify_threshold_s": 8,
+            "as_of":               now.isoformat(),
+        }
+
+    except Exception as exc:
+        logger.error("❌ /live-hourly error: %s", exc, exc_info=True)
+        return {
+            "success":             False,
+            "error":               str(exc),
+            "current_hour":        _hour_bucket(datetime.utcnow()),
+            "current_live_active": 0,
+            "unique_this_hour":    0,
+            "sessions_this_hour":  0,
+            "as_of":               datetime.utcnow().isoformat(),
         }
 
 
