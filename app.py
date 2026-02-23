@@ -21,6 +21,8 @@ from routes_public_bookings import router as bookings_router  # Includes payment
 from routes_public_events import router as public_events_router
 from routes_public_instagramFetch import router as instagram_router
 from routes_public_tiktokFetch import router as tiktok_router
+from routes_admin_portfolio import router as admin_portfolio_router
+from routes_public_portfolio import router as public_portfolio_router
 
 # Admin Routes
 from routes_admin_auth import router as admin_auth_router
@@ -29,6 +31,7 @@ from routes_admin_knowledge import router as admin_knowledge_router
 from routes_admin_analytics import router as admin_analytics_router
 from routes_admin_events import router as admin_events_router
 from routes_payment_webhooks import router as payment_webhook_router
+
 
 # ✅ WebSocket Live Viewer Manager (replaces routes_visitor_heartbeat)
 from ws_live import live_manager
@@ -475,6 +478,10 @@ logger.info("✅ Loaded: Public Chat Routes (/chat)")
 # Booking Service (Includes Multi-Provider Payment Endpoints)
 app.include_router(bookings_router, tags=["Public - Bookings & Payments"])
 
+# Portfolio pages to See Images and Videos
+app.include_router(public_portfolio_router, tags=["Public - Portfolio"])
+
+
 # Payment Webhooks (Global - No Prefix)
 app.include_router(payment_webhook_router, tags=["Public - Payment Webhooks"])
 logger.info("✅ Loaded: Payment Webhook Routes")
@@ -511,6 +518,7 @@ logger.info("✅ Loaded: TikTok Routes")
 app.include_router(admin_auth_router, tags=["Admin - Auth"])
 logger.info("✅ Loaded: Admin Auth Routes")
 
+
 # Admin Booking Management
 app.include_router(admin_bookings_router, tags=["Admin - Bookings & Payments"])
 logger.info("✅ Loaded: Admin Booking Routes with Multi-Provider Payment")
@@ -519,9 +527,15 @@ logger.info("   ├── POST  /admin/bookings/{id}/refund")
 logger.info("   ├── GET   /admin/bookings/{id}/payment-history")
 logger.info("   └── GET   /admin/bookings/payments/analytics")
 
-# Admin Knowledge Base
-app.include_router(admin_knowledge_router, tags=["Admin - Knowledge"])
-logger.info("✅ Loaded: Admin Knowledge Routes")
+
+# Admin Events
+app.include_router(admin_events_router, tags=["Admin - Events"])
+logger.info("✅ Loaded: Admin Event Routes")
+
+
+# Portfolio pages Images Upload + Video Upload(unlisted) from admin sides
+app.include_router(admin_portfolio_router, tags=["Admin - Portfolio"])
+
 
 # Admin Analytics
 app.include_router(admin_analytics_router, tags=["Admin - Analytics"])
@@ -538,11 +552,6 @@ logger.info("   ├── GET  /admin/analytics/event-bookings/stats")
 logger.info("   ├── GET  /admin/analytics/export/service-bookings")
 logger.info("   └── GET  /admin/analytics/export/event-bookings")
 
-# Admin Events
-app.include_router(admin_events_router, tags=["Admin - Events"])
-logger.info("✅ Loaded: Admin Event Routes")
-
-
 # ============================================================
 # WEBSOCKET LOGS
 # ============================================================
@@ -551,6 +560,11 @@ logger.info("   ├── On connect  → register + broadcast count")
 logger.info("   ├── On message  → ping (update last_activity)")
 logger.info("   ├── On disconnect → remove + broadcast count")
 logger.info("   └── Cleanup task → remove inactive (>30s) every 10s")
+
+
+# Admin Knowledge Base
+app.include_router(admin_knowledge_router, tags=["Admin - Knowledge"])
+logger.info("✅ Loaded: Admin Knowledge Routes")
 
 
 # ============================================================

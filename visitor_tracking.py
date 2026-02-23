@@ -41,6 +41,7 @@ SKIP_PREFIXES = (
     "/khalti",
     "/api/visitor",   # heartbeat itself — never track this
     "/ws/",           # WebSocket endpoints — never count as page visits
+    "/ws/live",
 )
 
 SKIP_EXTENSIONS = (
@@ -186,7 +187,6 @@ class SmartVisitorMiddleware(BaseHTTPMiddleware):
                         "referrer":       referrer,
                         "is_live":        False,
                         "last_heartbeat": None,
-                        "page_count":     0,
                         "is_human":       True,
                     },
                     "$set": {
