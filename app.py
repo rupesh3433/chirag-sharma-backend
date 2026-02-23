@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Request, HTTPException
+# app.py
+
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
@@ -20,8 +22,6 @@ from routes_public_events import router as public_events_router
 from routes_public_instagramFetch import router as instagram_router
 from routes_public_tiktokFetch import router as tiktok_router
 
-from visitor_tracking import setup_visitor_tracking
-
 # Admin Routes
 from routes_admin_auth import router as admin_auth_router
 from routes_admin_bookings import router as admin_bookings_router  # Includes payment management
@@ -29,6 +29,9 @@ from routes_admin_knowledge import router as admin_knowledge_router
 from routes_admin_analytics import router as admin_analytics_router
 from routes_admin_events import router as admin_events_router
 from routes_payment_webhooks import router as payment_webhook_router
+
+# ✅ WebSocket Live Viewer Manager (replaces routes_visitor_heartbeat)
+from ws_live import live_manager
 
 # Agent
 from agent import AgentOrchestrator, create_agent_router
@@ -55,6 +58,11 @@ logger = logging.getLogger(__name__)
 # ----------------------
 orchestrator = None
 agent_router = None
+
+# ----------------------
+# Background tasks storage (for clean shutdown)
+# ----------------------
+_background_tasks = []
 
 # ----------------------
 # Lifespan Management
@@ -107,6 +115,31 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Database health check warning: {e}")
 
+        # ── Start WebSocket cleanup task ────────────────────────────
+        # Removes inactive connections every 10 seconds.
+        # Connections idle for 30s+ are auto-closed.
+        try:
+            await live_manager.start_cleanup_task()
+            logger.info("✅ WebSocket live viewer manager started")
+            logger.info("   ├── Cleanup interval: 10 seconds")
+            logger.info("   └── Inactivity timeout: 30 seconds")
+        except Exception as e:
+            logger.warning(f"⚠️ WebSocket manager startup warning: {e}")
+
+        # ── Start analytics counter cleanup task ───────────────────
+        # Removes expired time buckets (hourly > 48h, daily > 30d).
+        # Runs every 1 hour. Keeps analytics_counters document bounded.
+        try:
+            from analytics_counter import start_cleanup_task as start_counter_cleanup
+            counter_task = await start_counter_cleanup()
+            _background_tasks.append(counter_task)
+            logger.info("✅ Analytics counter cleanup task started")
+            logger.info("   ├── Cleanup interval: 1 hour")
+            logger.info("   ├── Hourly bucket TTL: 48 hours")
+            logger.info("   └── Daily bucket TTL: 30 days")
+        except Exception as e:
+            logger.warning(f"⚠️ Counter cleanup task startup warning: {e}")
+
         logger.info("=" * 60)
         logger.info("✅ STARTUP COMPLETE")
         logger.info("=" * 60)
@@ -121,6 +154,16 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Application shutting down...")
 
     try:
+        # Stop WebSocket cleanup task
+        live_manager.stop_cleanup_task()
+        logger.info("✅ WebSocket manager stopped")
+
+        # Cancel analytics background tasks
+        for task in _background_tasks:
+            task.cancel()
+        if _background_tasks:
+            logger.info(f"✅ Cancelled {len(_background_tasks)} background tasks")
+
         if orchestrator:
             cleaned = orchestrator.memory_service.cleanup_old_sessions()
             logger.info(f"🧹 Cleaned up {cleaned} sessions")
@@ -137,7 +180,7 @@ async def lifespan(app: FastAPI):
 # ----------------------
 app = FastAPI(
     title="JinniChirag Website Backend",
-    description="Backend API for JinniChirag booking system with AI agent, Event Management, and Multi-Provider Payment Processing (Razorpay INR + Khalti NPR)",
+    description="Backend API for JinniChirag booking system with AI agent, Event Management, Multi-Provider Payment (Razorpay INR + Khalti NPR), WebSocket Live Viewers, and Counter Analytics",
     version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -146,10 +189,16 @@ app = FastAPI(
 
 # ----------------------
 # Visitor Tracking Middleware
+# Registers SmartVisitorMiddleware which:
+#   1. Upserts site_sessions (1 per IP per hour)
+#   2. Atomically increments analytics_counters (total/hourly/daily)
 # ----------------------
 from visitor_tracking import setup_visitor_tracking
 setup_visitor_tracking(app)
 logger.info("✅ Visitor Tracking Middleware Registered")
+logger.info("   ├── Session dedup: 1 doc per IP per hour")
+logger.info("   └── Counter increment: atomic $inc per request")
+
 
 # ----------------------
 # CORS Middleware
@@ -198,9 +247,69 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# ----------------------
-# Root Endpoints
-# ----------------------
+
+# ============================================================
+# WEBSOCKET — REAL-TIME LIVE VIEWERS
+# ============================================================
+
+@app.websocket("/ws/live")
+async def websocket_live_viewers(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time live viewer count.
+
+    Each browser tab that connects is registered as one live viewer.
+    On connect: registered + count broadcast to all clients.
+    On message: treated as a ping (updates last_activity timestamp).
+    On disconnect or 30s inactivity: removed + count rebroadcast.
+
+    Scales to 5,000+ concurrent WebSocket connections via async I/O.
+    Background cleanup task runs every 10 seconds.
+
+    Message format sent to client:
+        {"type": "live_count", "count": <int>}
+
+    Message format for ping from client (any text):
+        → server replies with {"type": "pong", "count": <int>}
+
+    Frontend usage:
+        const ws = new WebSocket("wss://your-api.com/ws/live");
+        ws.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            if (data.type === "live_count") setLiveCount(data.count);
+        };
+        setInterval(() => ws.send("ping"), 15000);  // keep alive
+    """
+    conn_id = str(uuid.uuid4())
+
+    await live_manager.connect(websocket, conn_id)
+
+    try:
+        while True:
+            # Receive any message → treat as heartbeat ping
+            _data = await websocket.receive_text()
+            await live_manager.ping(conn_id)
+
+            # Reply with current count (pong)
+            try:
+                await websocket.send_json({
+                    "type":  "pong",
+                    "count": live_manager.get_live_count(),
+                })
+            except Exception:
+                break  # Connection broken — exit loop to disconnect
+
+    except WebSocketDisconnect:
+        pass  # Normal client disconnect
+    except Exception as exc:
+        logger.debug("WS error [%s]: %s", conn_id[:8], exc)
+    finally:
+        await live_manager.disconnect(conn_id)
+
+
+# ============================================================
+# ROOT ENDPOINTS
+# ============================================================
+
 @app.get("/")
 async def root():
     """Root endpoint - service status"""
@@ -215,7 +324,8 @@ async def root():
             "health": "/health",
             "chat": "/chat",
             "bookings": "/bookings (includes payment)",
-            "admin": "/admin"
+            "admin": "/admin",
+            "ws_live": "/ws/live (WebSocket - real-time live viewers)",
         },
         "features": [
             "AI Chatbot (Multi-language)",
@@ -223,8 +333,17 @@ async def root():
             "Multi-Provider Payment Processing (Razorpay + Khalti)",
             "Admin Approval with Payment Options Link",
             "Event Management",
-            "WhatsApp Notifications"
+            "WhatsApp Notifications",
+            "WebSocket-based Real-Time Live Viewers (/ws/live)",
+            "Counter-Only Analytics (analytics_counters — no raw visit logs)",
+            "Auto-cleanup of Expired Time Buckets",
         ],
+        "analytics": {
+            "live_viewers": "WebSocket /ws/live (real-time push)",
+            "counters": "GET /admin/analytics/counter-stats (total/today/hour/24h/30d)",
+            "visitors": "GET /admin/analytics/visitors (session-based detail)",
+            "cleanup": "Automatic — hourly buckets 48h TTL, daily buckets 30d TTL",
+        },
         "payment": {
             "providers": {
                 "razorpay": "INR (India)",
@@ -263,6 +382,39 @@ async def health():
             "error": str(e)
         }
         health_status["status"] = "degraded"
+
+    # Check WebSocket Live Manager
+    try:
+        health_status["services"]["websocket_live"] = {
+            "status": "healthy",
+            "live_connections": live_manager.get_live_count(),
+            "cleanup_running": (
+                live_manager._cleanup_task is not None
+                and not live_manager._cleanup_task.done()
+            ),
+        }
+    except Exception as e:
+        health_status["services"]["websocket_live"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+        health_status["status"] = "degraded"
+
+    # Check Analytics Counter
+    try:
+        from analytics_counter import get_counters
+        doc = get_counters()
+        health_status["services"]["analytics_counters"] = {
+            "status": "healthy",
+            "total_visits": doc.get("total", 0),
+            "hourly_buckets": len(doc.get("hourly", {})),
+            "daily_buckets": len(doc.get("daily", {})),
+        }
+    except Exception as e:
+        health_status["services"]["analytics_counters"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
 
     # Check Razorpay Payment Service
     try:
@@ -312,32 +464,19 @@ async def health():
     return health_status
 
 
-# ----------------------
-# Include Routers
-# ----------------------
-
 # ============================================================
 # PUBLIC ROUTES
 # ============================================================
 
 # Chat Service (AI Chatbot)
-app.include_router(
-    chat_router,
-    tags=["Public - Chat"]
-)
+app.include_router(chat_router, tags=["Public - Chat"])
 logger.info("✅ Loaded: Public Chat Routes (/chat)")
 
 # Booking Service (Includes Multi-Provider Payment Endpoints)
-app.include_router(
-    bookings_router,
-    tags=["Public - Bookings & Payments"]
-)
+app.include_router(bookings_router, tags=["Public - Bookings & Payments"])
 
 # Payment Webhooks (Global - No Prefix)
-app.include_router(
-    payment_webhook_router,
-    tags=["Public - Payment Webhooks"]
-)
+app.include_router(payment_webhook_router, tags=["Public - Payment Webhooks"])
 logger.info("✅ Loaded: Payment Webhook Routes")
 logger.info("   ├── POST /razorpay/webhook")
 logger.info("   └── POST /khalti/webhook")
@@ -345,80 +484,80 @@ logger.info("   └── POST /khalti/webhook")
 logger.info("✅ Loaded: Public Booking Routes with Multi-Provider Payment (/bookings)")
 logger.info("   ├── POST /bookings/request")
 logger.info("   ├── POST /bookings/verify-otp")
-logger.info("   ├── POST /bookings/{id}/create-payment  ← NEW (razorpay|khalti)")
+logger.info("   ├── POST /bookings/{id}/create-payment  ← razorpay|khalti")
 logger.info("   ├── POST /bookings/razorpay/verify-payment")
-logger.info("   ├── POST /bookings/khalti/verify-payment  ← NEW")
+logger.info("   ├── POST /bookings/khalti/verify-payment")
 logger.info("   ├── POST /bookings/payment-failed")
 logger.info("   ├── GET  /bookings/{id}/payment-status")
 logger.info("   └── POST /bookings/{id}/cancel")
 
 # Event Service (Public Events)
-app.include_router(
-    public_events_router,
-    tags=["Public - Events"]
-)
+app.include_router(public_events_router, tags=["Public - Events"])
 logger.info("✅ Loaded: Public Event Routes")
 
 # Social Media Fetching
-app.include_router(
-    instagram_router,
-    tags=["Public - Instagram"]
-)
+app.include_router(instagram_router, tags=["Public - Instagram"])
 logger.info("✅ Loaded: Instagram Routes")
 
-app.include_router(
-    tiktok_router,
-    tags=["Public - TikTok"]
-)
+app.include_router(tiktok_router, tags=["Public - TikTok"])
 logger.info("✅ Loaded: TikTok Routes")
+
 
 # ============================================================
 # ADMIN ROUTES (Protected)
 # ============================================================
 
 # Admin Authentication
-app.include_router(
-    admin_auth_router,
-    tags=["Admin - Auth"]
-)
+app.include_router(admin_auth_router, tags=["Admin - Auth"])
 logger.info("✅ Loaded: Admin Auth Routes")
 
-# Admin Booking Management (Multi-Provider Payment Management)
-app.include_router(
-    admin_bookings_router,
-    tags=["Admin - Bookings & Payments"]
-)
+# Admin Booking Management
+app.include_router(admin_bookings_router, tags=["Admin - Bookings & Payments"])
 logger.info("✅ Loaded: Admin Booking Routes with Multi-Provider Payment")
-logger.info("   ├── PATCH /admin/bookings/{id}/status  ← sets APPROVED + amount only")
-logger.info("   ├── POST  /admin/bookings/{id}/refund  ← provider-aware refund")
+logger.info("   ├── PATCH /admin/bookings/{id}/status")
+logger.info("   ├── POST  /admin/bookings/{id}/refund")
 logger.info("   ├── GET   /admin/bookings/{id}/payment-history")
-logger.info("   └── GET   /admin/bookings/payments/analytics  ← multi-provider")
+logger.info("   └── GET   /admin/bookings/payments/analytics")
 
 # Admin Knowledge Base
-app.include_router(
-    admin_knowledge_router,
-    tags=["Admin - Knowledge"]
-)
+app.include_router(admin_knowledge_router, tags=["Admin - Knowledge"])
 logger.info("✅ Loaded: Admin Knowledge Routes")
 
 # Admin Analytics
-app.include_router(
-    admin_analytics_router,
-    tags=["Admin - Analytics"]
-)
+app.include_router(admin_analytics_router, tags=["Admin - Analytics"])
 logger.info("✅ Loaded: Admin Analytics Routes")
+logger.info("   ├── GET  /admin/analytics/counter-stats  ← NEW (counter-only, O(1))")
+logger.info("   ├── GET  /admin/analytics/live-viewers   ← UPDATED (WebSocket-based)")
+logger.info("   ├── GET  /admin/analytics/overview")
+logger.info("   ├── GET  /admin/analytics/visitors")
+logger.info("   ├── POST /admin/analytics/counter-cleanup ← NEW (manual trigger)")
+logger.info("   ├── GET  /admin/analytics/by-service")
+logger.info("   ├── GET  /admin/analytics/by-month")
+logger.info("   ├── GET  /admin/analytics/service-bookings/stats")
+logger.info("   ├── GET  /admin/analytics/event-bookings/stats")
+logger.info("   ├── GET  /admin/analytics/export/service-bookings")
+logger.info("   └── GET  /admin/analytics/export/event-bookings")
 
 # Admin Events
-app.include_router(
-    admin_events_router,
-    tags=["Admin - Events"]
-)
+app.include_router(admin_events_router, tags=["Admin - Events"])
 logger.info("✅ Loaded: Admin Event Routes")
+
+
+# ============================================================
+# WEBSOCKET LOGS
+# ============================================================
+logger.info("✅ Loaded: WebSocket Live Viewers (WS /ws/live)")
+logger.info("   ├── On connect  → register + broadcast count")
+logger.info("   ├── On message  → ping (update last_activity)")
+logger.info("   ├── On disconnect → remove + broadcast count")
+logger.info("   └── Cleanup task → remove inactive (>30s) every 10s")
+
 
 # ============================================================
 # AGENT ROUTER (Injected during lifespan startup)
 # ============================================================
 logger.info("ℹ️ Agent router will be loaded during startup")
+
 
 # ----------------------
 # API Documentation Enhancement
@@ -433,32 +572,35 @@ async def api_info():
             "swagger": "/docs",
             "redoc": "/redoc"
         },
-        "architecture": {
-            "payment_integration": "Multi-Provider Payment Orchestration Layer",
-            "providers": {
-                "razorpay": {
-                    "currency": "INR",
-                    "webhook": "POST /razorpay/webhook",
-                    "verify": "POST /bookings/razorpay/verify-payment"
-                },
-                "khalti": {
-                    "currency": "NPR",
-                    "webhook": "POST /khalti/webhook",
-                    "verify": "POST /bookings/khalti/verify-payment"
-                }
+        "analytics_architecture": {
+            "live_viewers": {
+                "method": "WebSocket (/ws/live)",
+                "mechanism": "Each connected browser tab = 1 live viewer",
+                "inactivity_timeout": "30 seconds",
+                "cleanup_interval": "10 seconds",
+                "broadcast": "Count pushed to all clients on every change",
             },
-            "approval_triggers_payment": False,
-            "approval_flow": "Admin sets APPROVED + amount → WhatsApp payment-options link → User selects provider"
+            "counters": {
+                "collection": "analytics_counters",
+                "document": "_id='global' (single document, always)",
+                "fields": ["total", "hourly.{YYYY-MM-DD-HH}", "daily.{YYYY-MM-DD}"],
+                "writes": "Atomic $inc — no raw visit documents",
+                "reads": "O(1) — no aggregation pipelines",
+                "cleanup": "Hourly buckets 48h TTL, daily 30d TTL, runs every 1h",
+            },
+            "sessions": {
+                "collection": "site_sessions",
+                "document": "1 per IP per hour (NOT a raw visit log)",
+                "used_for": "Detailed analytics: top pages, referrers, quality metrics",
+                "ttl": "90 days (MongoDB TTL index on last_seen)",
+            },
         },
         "endpoint_groups": {
             "public": {
                 "chat": "/chat (AI Chatbot)",
                 "bookings": "/bookings (Bookings + Multi-Provider Payment)",
                 "events": "/events (Public Events)",
-                "webhooks": {
-                    "razorpay": "/razorpay/webhook",
-                    "khalti": "/khalti/webhook"
-                }
+                "websocket_live": "WS /ws/live (Real-time live viewer count)",
             },
             "admin": {
                 "auth": "/admin/auth (Admin Authentication)",
@@ -467,28 +609,7 @@ async def api_info():
                 "analytics": "/admin/analytics (Analytics Dashboard)",
                 "events": "/admin/events (Event Management)"
             },
-            "agent": {
-                "chat": "/agent/chat (AI Agent)",
-                "health": "/agent/health (Agent Health)"
-            }
         },
-        "features": {
-            "booking_flow": "OTP → Verify → Pending → Admin Approves (amount set) → User selects Razorpay/Khalti → Pays → Confirmed",
-            "payment_providers": {
-                "india": "Razorpay (INR) - Active",
-                "nepal": "Khalti (NPR) - Active"
-            },
-            "notifications": "WhatsApp (Twilio)",
-            "languages": ["English", "Nepali", "Hindi", "Marathi"]
-        },
-        "approval_workflow": {
-            "step_1": "Admin approves booking via PATCH /admin/bookings/{id}/status (sets amount, NO payment order created)",
-            "step_2": "WhatsApp sent with generic payment-options link to customer",
-            "step_3": "Customer visits link → selects Razorpay or Khalti",
-            "step_4": "Frontend calls POST /bookings/{id}/create-payment with chosen provider",
-            "step_5": "Customer completes payment on provider checkout",
-            "step_6": "Webhook fires → backend verifies via API → Booking CONFIRMED"
-        }
     }
 
 
