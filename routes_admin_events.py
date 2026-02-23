@@ -216,7 +216,7 @@ async def get_all_event_bookings(
     }
 
 
-@router.get("/bookings/stats", response_model=dict)
+@router.get("/event-bookings/stats", response_model=dict)
 async def get_event_bookings_stats(
     event_id: Optional[str] = None,
     current_admin: dict = Depends(get_current_admin)
